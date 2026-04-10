@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# PingBlock dev launcher
+# Starts: backend → ADB port forward → flutter run on Seeker
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BACKEND_PORT=3000
+DEVICE_ID="SM02G4061957251"
+LOG_DIR="$ROOT/.logs"
+mkdir -p "$LOG_DIR"
+
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+divider() { echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+info()    { echo -e "${GREEN}[+]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
+error()   { echo -e "${RED}[✗]${NC} $1"; }
+
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+divider
+echo -e "  ${CYAN}PingBlock Dev${NC}"
+divider
+
+# Check flutter
+if ! command -v flutter &>/dev/null; then
+  error "flutter not found in PATH"
+  exit 1
+fi
+
+# Check node
+if ! command -v node &>/dev/null; then
+  error "node not found in PATH"
+  exit 1
+fi
+
+# Check device
+if ! adb devices 2>/dev/null | grep -q "$DEVICE_ID"; then
+  warn "Seeker ($DEVICE_ID) not detected via ADB."
+  warn "Falling back to first available device."
+  DEVICE_FLAG=""
+else
+  DEVICE_FLAG="-d $DEVICE_ID"
+fi
+
+# ── Kill any existing backend on that port ────────────────────────────────────
+if lsof -ti:$BACKEND_PORT &>/dev/null; then
+  warn "Port $BACKEND_PORT already in use — killing old process..."
+  lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
+  sleep 1
+fi
+
+# ── Start backend ─────────────────────────────────────────────────────────────
+info "Starting backend on :$BACKEND_PORT..."
+cd "$ROOT/apps/backend"
+
+# Install if node_modules missing
+if [ ! -d "node_modules" ]; then
+  warn "node_modules not found — running npm install..."
+  npm install --silent
+fi
+
+node src/server.js > "$LOG_DIR/backend.log" 2>&1 &
+BACKEND_PID=$!
+echo $BACKEND_PID > "$LOG_DIR/backend.pid"
+
+# Wait for backend to be ready
+info "Waiting for backend..."
+for i in {1..15}; do
+  if curl -sf "http://localhost:$BACKEND_PORT/health" &>/dev/null; then
+    info "Backend ready ✓"
+    break
+  fi
+  if ! kill -0 $BACKEND_PID 2>/dev/null; then
+    error "Backend process died. Check $LOG_DIR/backend.log"
+    cat "$LOG_DIR/backend.log"
+    exit 1
+  fi
+  sleep 1
+done
+
+# ── ADB port reverse ──────────────────────────────────────────────────────────
+if adb devices 2>/dev/null | grep -q "$DEVICE_ID"; then
+  info "Setting up ADB port reverse: device:$BACKEND_PORT → mac:$BACKEND_PORT"
+  adb -s "$DEVICE_ID" reverse tcp:$BACKEND_PORT tcp:$BACKEND_PORT
+  info "Port forward active ✓  (device can reach backend at localhost:$BACKEND_PORT)"
+else
+  warn "ADB reverse not set — you may need to configure the server IP manually"
+fi
+
+# ── Flutter run ───────────────────────────────────────────────────────────────
+divider
+info "Launching Flutter app on Seeker..."
+echo ""
+cd "$ROOT/apps/frontend"
+
+# Install flutter deps if needed
+if [ ! -d ".dart_tool" ]; then
+  info "Running flutter pub get..."
+  flutter pub get
+fi
+
+# Run — this stays in foreground so Ctrl+C kills everything
+cleanup() {
+  echo ""
+  warn "Shutting down..."
+  kill $BACKEND_PID 2>/dev/null || true
+  adb -s "$DEVICE_ID" reverse --remove tcp:$BACKEND_PORT 2>/dev/null || true
+  info "Done."
+}
+trap cleanup EXIT INT TERM
+
+flutter run $DEVICE_FLAG --dart-define=BACKEND_URL=http://localhost:$BACKEND_PORT

@@ -1,0 +1,19 @@
+[package]
+name = "ping_pong"
+version = "0.1.0"
+description = "PingBlock on-chain program — game state + VRF"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "ping_pong"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.32.0"

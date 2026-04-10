@@ -1,0 +1,32 @@
+# ── Node.js ──────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+.env
+.env.local
+
+# ── Flutter / Dart ────────────────────────────────────────────────────────────
+apps/frontend/.dart_tool/
+apps/frontend/.flutter-plugins
+apps/frontend/.flutter-plugins-dependencies
+apps/frontend/.packages
+apps/frontend/build/
+apps/frontend/.pub-cache/
+apps/frontend/android/.gradle/
+apps/frontend/android/local.properties
+apps/frontend/android/app/debug.keystore
+apps/frontend/android/key.properties
+apps/frontend/.idea/workspace.xml
+
+# ── Solana / Anchor ───────────────────────────────────────────────────────────
+programs/ping_pong/target/
+programs/ping_pong/.anchor/
+programs/ping_pong/test-ledger/
+
+# ── Logs & temp ───────────────────────────────────────────────────────────────
+.logs/
+*.log
+*.pid
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
