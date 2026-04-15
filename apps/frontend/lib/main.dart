@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'screens/lobby_screen.dart';
+import 'screens/wallet_connect_screen.dart';
+import 'services/wallet_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Allow both portrait (lobby) and landscape (game)
+  // Allow both portrait (lobby/wallet) and landscape (game).
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.landscapeLeft,
@@ -16,7 +17,11 @@ void main() {
 }
 
 class PingBlockApp extends StatelessWidget {
-  const PingBlockApp({super.key});
+  /// Inject a custom [WalletService] (e.g. a mock in tests).
+  /// Defaults to the real [MobileWalletAdapterService] in production.
+  final WalletService? walletService;
+
+  const PingBlockApp({super.key, this.walletService});
 
   @override
   Widget build(BuildContext context) {
@@ -30,7 +35,9 @@ class PingBlockApp extends StatelessWidget {
           secondary: Color(0xFF64D9FF),
         ),
       ),
-      home: const LobbyScreen(),
+      home: WalletConnectScreen(
+        walletService: walletService ?? MobileWalletAdapterService(),
+      ),
     );
   }
 }

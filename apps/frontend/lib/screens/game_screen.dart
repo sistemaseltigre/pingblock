@@ -14,12 +14,18 @@ class GameScreen extends StatefulWidget {
   final GameState gameState;
   final SocketService socketService;
   final String mySide;
+  /// Full base58 wallet address — threaded back to LobbyScreen on game over.
+  final String walletAddress;
+  /// Pre-formatted display name (e.g. "4Nd1...EKL").
+  final String displayName;
 
   const GameScreen({
     super.key,
     required this.gameState,
     required this.socketService,
     required this.mySide,
+    required this.walletAddress,
+    required this.displayName,
   });
 
   @override
@@ -124,7 +130,12 @@ class _GameScreenState extends State<GameScreen> {
             onPressed: () {
               widget.socketService.disconnect();
               Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const LobbyScreen()),
+                MaterialPageRoute(
+                  builder: (_) => LobbyScreen(
+                    walletAddress: widget.walletAddress,
+                    displayName:   widget.displayName,
+                  ),
+                ),
                 (_) => false,
               );
             },
@@ -147,7 +158,12 @@ class _GameScreenState extends State<GameScreen> {
             onPressed: () {
               widget.socketService.disconnect();
               Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const LobbyScreen()),
+                MaterialPageRoute(
+                  builder: (_) => LobbyScreen(
+                    walletAddress: widget.walletAddress,
+                    displayName:   widget.displayName,
+                  ),
+                ),
                 (_) => false,
               );
             },

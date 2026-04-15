@@ -5,7 +5,17 @@ import '../services/socket_service.dart';
 import 'game_screen.dart';
 
 class LobbyScreen extends StatefulWidget {
-  const LobbyScreen({super.key});
+  /// Full base58 wallet address (e.g. "4Nd1mBQtrMJVYVfKf2PX98AeguLmasRF3zjeA3FEnEKL").
+  final String walletAddress;
+
+  /// Pre-formatted display name shown in the UI (e.g. "4Nd1...EKL").
+  final String displayName;
+
+  const LobbyScreen({
+    super.key,
+    required this.walletAddress,
+    required this.displayName,
+  });
 
   @override
   State<LobbyScreen> createState() => _LobbyScreenState();
@@ -13,7 +23,8 @@ class LobbyScreen extends StatefulWidget {
 
 class _LobbyScreenState extends State<LobbyScreen> {
   final _socket = SocketService();
-  final _nameController = TextEditingController(text: 'Player');
+  // Read-only: name is derived from the connected wallet — not user-editable.
+  late final TextEditingController _nameController;
   String _status = 'Disconnected';
   bool _searching = false;
   // True once we push the GameScreen so dispose() doesn't kill the socket mid-game
@@ -33,6 +44,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
   @override
   void initState() {
     super.initState();
+    // The display name comes from the wallet — it is read-only and cannot
+    // be changed by the user.
+    _nameController = TextEditingController(text: widget.displayName);
     _connectAndSetup();
   }
 
@@ -94,9 +108,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => GameScreen(
-            gameState: gs,
+            gameState:     gs,
             socketService: _socket,
-            mySide: mySide,
+            mySide:        mySide,
+            walletAddress: widget.walletAddress,
+            displayName:   widget.displayName,
           ),
         ),
       );
@@ -104,13 +120,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
   }
 
   void _findMatch() {
-    final name = _nameController.text.trim().isEmpty ? 'Player' : _nameController.text.trim();
+    // Always use the wallet-derived display name as the matchmaking identity.
+    final name = widget.displayName.isNotEmpty ? widget.displayName : 'Player';
     setState(() => _searching = true);
     _socket.joinLobby(name);
   }
 
   void _playVsCpu() {
-    final name = _nameController.text.trim().isEmpty ? 'Player' : _nameController.text.trim();
+    final name = widget.displayName.isNotEmpty ? widget.displayName : 'Player';
     setState(() => _searching = true);
     _socket.joinVsCpu(name, _selectedDifficulty);
   }
@@ -164,26 +181,44 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
                 const SizedBox(height: 32),
 
-                // ── Name input ─────────────────────────────────────────────
+                // ── Wallet identity (read-only) ────────────────────────────
                 TextField(
                   controller: _nameController,
-                  maxLength: 16,
-                  enabled: !_searching,
-                  style: const TextStyle(color: Colors.white),
+                  readOnly: true,
+                  style: const TextStyle(
+                    color: Color(0xFF9945FF),
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1,
+                  ),
                   decoration: InputDecoration(
-                    labelText: 'Your Name',
+                    labelText: 'Your Wallet',
                     labelStyle: const TextStyle(color: Colors.white38),
-                    counterStyle: const TextStyle(color: Colors.white24),
+                    prefixIcon: const Icon(
+                      Icons.account_balance_wallet,
+                      color: Color(0xFF9945FF),
+                      size: 18,
+                    ),
+                    suffixIcon: const Icon(
+                      Icons.lock_outline,
+                      color: Colors.white24,
+                      size: 16,
+                    ),
+                    helperText: widget.walletAddress,
+                    helperStyle: const TextStyle(
+                      color: Colors.white24,
+                      fontSize: 9,
+                      letterSpacing: 0.5,
+                    ),
                     enabledBorder: OutlineInputBorder(
-                      borderSide: const BorderSide(color: Color(0xFF2A2A3A)),
+                      borderSide: BorderSide(
+                        color: const Color(0xFF9945FF).withValues(alpha: 0.35),
+                      ),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     focusedBorder: OutlineInputBorder(
-                      borderSide: const BorderSide(color: Color(0xFFFF6B35)),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    disabledBorder: OutlineInputBorder(
-                      borderSide: const BorderSide(color: Color(0xFF1A1A2A)),
+                      borderSide: BorderSide(
+                        color: const Color(0xFF9945FF).withValues(alpha: 0.6),
+                      ),
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
