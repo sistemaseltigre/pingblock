@@ -58,71 +58,120 @@ abstract class WalletService {
 /// for verification. Using `http://localhost` avoids any scheme-mismatch
 /// warnings some wallets display for non-https URIs in local/debug builds.
 ///
-/// ### Why a cached FlutterEngine is required
-/// When the wallet app takes over the foreground, Android pauses/stops our
-/// activity. Without a cached engine (see PingBlockApplication.kt), the
-/// platform channel that `scenario.start()` awaits is torn down before the
-/// wallet finishes connecting, causing an immediate "Disconnected during
-/// normal operation" on the wallet side and a null result here.
 class MobileWalletAdapterService implements WalletService {
-  // Use http://localhost so local/debug builds don't trigger "untrusted" UI
-  // in wallet apps. For production, change to https://pingblock.app.
-  static final _identityUri = Uri.parse('http://localhost');
-  static final _iconUri     = Uri.parse('http://localhost/favicon.ico');
+  // Use a stable https origin for MWA identity metadata.
+  static final _identityUri = Uri.parse('https://pingblock.app');
   static const _identityName = 'PingBlock';
   static const _cluster      = 'devnet'; // switch to 'mainnet-beta' for prod
+  static const _authorizeTimeout = Duration(seconds: 15);
+  static const _retryBackoff = Duration(milliseconds: 350);
+  static const _associationSettleDelay = Duration(milliseconds: 700);
+  static const _maxAttempts = 2;
 
   @override
   Future<WalletConnectionResult?> connect() async {
-    LocalAssociationScenario? scenario;
     try {
-      scenario = await LocalAssociationScenario.create();
+      _debugLog('connect() start');
+      final endpointAvailable = await LocalAssociationScenario.isAvailable();
+      _debugLog('isAvailable=$endpointAvailable');
+      if (!endpointAvailable) {
+        throw Exception('No Solana Mobile Wallet Adapter endpoint available');
+      }
 
-      // Launch the wallet picker.
-      // - null  → uses the ActivityResultLauncher pre-registered by the
-      //   solana_mobile_client plugin in onAttachedToActivity.
-      // - The Flutter engine is cached in PingBlockApplication so the Dart VM
-      //   stays alive while the wallet is in the foreground.
-      scenario.startActivityForResult(null);
+      Object? lastError;
+      for (var attempt = 0; attempt < _maxAttempts; attempt++) {
+        try {
+          _debugLog('attempt ${attempt + 1}/$_maxAttempts');
+          return await _connectOnce();
+        } on Exception catch (e) {
+          lastError = e;
+          _debugLog('attempt ${attempt + 1} failed: $e');
+          if (_isUserRejected(e)) return null;
+          if (attempt + 1 < _maxAttempts && _isTransientAssociationError(e)) {
+            await Future.delayed(_retryBackoff);
+            continue;
+          }
+          rethrow;
+        }
+      }
 
-      // Wait for the wallet to connect and establish the encrypted session.
-      // Timeout after 60 s — if the user dismisses the wallet without
-      // approving, the wallet may not send a disconnect, so we timeout.
-      final client = await scenario.start().timeout(
-        const Duration(seconds: 60),
-        onTimeout: () => throw TimeoutException(
-          'Wallet did not respond within 60 seconds.',
-        ),
-      );
-
-      final authResult = await client.authorize(
-        identityUri:  _identityUri,
-        iconUri:      _iconUri,
-        identityName: _identityName,
-        cluster:      _cluster,
-      );
-
-      if (authResult == null) return null;
-
-      // publicKey is a raw 32-byte Uint8List; encode to the standard base58
-      // Solana address string (44 chars for Ed25519 keys).
-      final address = base58.encode(authResult.publicKey);
-
-      return WalletConnectionResult(
-        address:   address,
-        authToken: authResult.authToken,
-      );
-    } on Exception catch (e) {
+      if (lastError != null) {
+        throw Exception('Wallet connect failed: $lastError');
+      }
+      return null;
+    } on Exception catch (e, st) {
       // Log in debug builds.
       assert(() {
         // ignore: avoid_print
         print('[WalletService] connect() error: $e');
+        // ignore: avoid_print
+        print('[WalletService] connect() stack: $st');
         return true;
       }());
       return null;
-    } finally {
-      // Always close cleanly so the wallet app can free its MWA resources.
-      await scenario?.close();
     }
+  }
+
+  Future<WalletConnectionResult?> _connectOnce() async {
+    LocalAssociationScenario? scenario;
+    try {
+      scenario = await LocalAssociationScenario.create();
+      _debugLog('scenario created');
+
+      final clientFuture = scenario.start().timeout(_authorizeTimeout);
+      _debugLog('start() requested');
+      // ignore: discarded_futures
+      scenario.startActivityForResult(null);
+      _debugLog('startActivityForResult(null) launched');
+
+      final client = await clientFuture;
+      _debugLog('start() completed, client ready');
+      await Future.delayed(_associationSettleDelay);
+      _debugLog('settle delay completed: ${_associationSettleDelay.inMilliseconds}ms');
+
+      final authResult = await client.authorize(
+        identityUri: _identityUri,
+        identityName: _identityName,
+        cluster: _cluster,
+      ).timeout(_authorizeTimeout);
+      _debugLog('authorize() completed. null=${authResult == null}');
+
+      if (authResult == null) return null;
+
+      final address = base58.encode(authResult.publicKey);
+      _debugLog('authorize() success address=$address');
+      return WalletConnectionResult(
+        address: address,
+        authToken: authResult.authToken,
+      );
+    } finally {
+      _debugLog('closing scenario');
+      await scenario?.close();
+      _debugLog('scenario closed');
+    }
+  }
+
+  bool _isTransientAssociationError(Object e) {
+    final s = e.toString().toLowerCase();
+    return s.contains('econnrefused') ||
+        s.contains('connection refused') ||
+        s.contains('failed establishing a websocket connection') ||
+        s.contains('websocketexception') ||
+        s.contains('failed to connect') ||
+        s.contains('timeoutexception') ||
+        s.contains('timed out');
+  }
+
+  bool _isUserRejected(Object e) {
+    final s = e.toString().toLowerCase();
+    return s.contains('user rejected') || s.contains('declined');
+  }
+
+  static void _debugLog(String msg) {
+    assert(() {
+      // ignore: avoid_print
+      print('[WalletService] $msg');
+      return true;
+    }());
   }
 }
