@@ -52,11 +52,25 @@ abstract class WalletService {
 
 /// Uses [solana_mobile_client] to connect to any MWA-compatible wallet
 /// installed on the Android device (Phantom, Solflare, Seed Vault, etc.).
+///
+/// ### Why `http://localhost` as identityUri
+/// Wallet apps show the identityUri in their approval UI but do NOT fetch it
+/// for verification. Using `http://localhost` avoids any scheme-mismatch
+/// warnings some wallets display for non-https URIs in local/debug builds.
+///
+/// ### Why a cached FlutterEngine is required
+/// When the wallet app takes over the foreground, Android pauses/stops our
+/// activity. Without a cached engine (see PingBlockApplication.kt), the
+/// platform channel that `scenario.start()` awaits is torn down before the
+/// wallet finishes connecting, causing an immediate "Disconnected during
+/// normal operation" on the wallet side and a null result here.
 class MobileWalletAdapterService implements WalletService {
+  // Use http://localhost so local/debug builds don't trigger "untrusted" UI
+  // in wallet apps. For production, change to https://pingblock.app.
+  static final _identityUri = Uri.parse('http://localhost');
+  static final _iconUri     = Uri.parse('http://localhost/favicon.ico');
   static const _identityName = 'PingBlock';
-  static final _identityUri  = Uri.parse('https://pingblock.app');
-  static final _iconUri      = Uri.parse('https://pingblock.app/favicon.ico');
-  static const _cluster      = 'mainnet-beta';
+  static const _cluster      = 'devnet'; // switch to 'mainnet-beta' for prod
 
   @override
   Future<WalletConnectionResult?> connect() async {
@@ -64,12 +78,23 @@ class MobileWalletAdapterService implements WalletService {
     try {
       scenario = await LocalAssociationScenario.create();
 
-      // null → use the currently foregrounded Flutter Activity.
-      // The solana_mobile_client plugin resolves this internally via the
-      // Flutter plugin binding, which is the standard MWA dApp pattern.
+      // Launch the wallet picker.
+      // - null  → uses the ActivityResultLauncher pre-registered by the
+      //   solana_mobile_client plugin in onAttachedToActivity.
+      // - The Flutter engine is cached in PingBlockApplication so the Dart VM
+      //   stays alive while the wallet is in the foreground.
       scenario.startActivityForResult(null);
 
-      final client     = await scenario.start();
+      // Wait for the wallet to connect and establish the encrypted session.
+      // Timeout after 60 s — if the user dismisses the wallet without
+      // approving, the wallet may not send a disconnect, so we timeout.
+      final client = await scenario.start().timeout(
+        const Duration(seconds: 60),
+        onTimeout: () => throw TimeoutException(
+          'Wallet did not respond within 60 seconds.',
+        ),
+      );
+
       final authResult = await client.authorize(
         identityUri:  _identityUri,
         iconUri:      _iconUri,
@@ -88,6 +113,7 @@ class MobileWalletAdapterService implements WalletService {
         authToken: authResult.authToken,
       );
     } on Exception catch (e) {
+      // Log in debug builds.
       assert(() {
         // ignore: avoid_print
         print('[WalletService] connect() error: $e');
@@ -95,6 +121,7 @@ class MobileWalletAdapterService implements WalletService {
       }());
       return null;
     } finally {
+      // Always close cleanly so the wallet app can free its MWA resources.
       await scenario?.close();
     }
   }
