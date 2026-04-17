@@ -24,7 +24,7 @@ class MockWalletService implements WalletService {
     WalletConnectionResult? result,
     Duration delay = Duration.zero,
   })  : _result = result,
-        _delay  = delay;
+        _delay = delay;
 
   @override
   Future<WalletConnectionResult?> connect() async {
@@ -32,12 +32,22 @@ class MockWalletService implements WalletService {
     await Future.delayed(_delay);
     return _result;
   }
+
+  @override
+  Future<int?> getBalanceLamports(String walletAddress) async => null;
+
+  @override
+  Future<String?> signAndSendTransactionBase64({
+    required String transactionBase64,
+  }) async =>
+      null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const _testAddress = '4Nd1mBQtrMJVYVfKf2PX98AeguLmasRF3zjeA3FEnEKL';
-const _testResult  = WalletConnectionResult(address: _testAddress, authToken: 'tok');
+const _testResult =
+    WalletConnectionResult(address: _testAddress, authToken: 'tok');
 
 Widget _buildScreen(WalletService service) {
   return MaterialApp(home: WalletConnectScreen(walletService: service));
@@ -46,9 +56,9 @@ Widget _buildScreen(WalletService service) {
 /// Pump just enough frames to resolve a zero-delay future (connect() returns
 /// immediately) but stop well before the 600 ms navigation timer fires.
 Future<void> _pumpUntilConnectResolves(WidgetTester tester) async {
-  await tester.pump();  // tap callback starts
-  await tester.pump();  // connect() resolves, setState is called
-  await tester.pump();  // rebuild with new state
+  await tester.pump(); // tap callback starts
+  await tester.pump(); // connect() resolves, setState is called
+  await tester.pump(); // rebuild with new state
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -67,13 +77,14 @@ void main() {
 
     testWidgets('shows wallet icon', (tester) async {
       await tester.pumpWidget(_buildScreen(MockWalletService()));
-      expect(find.byIcon(Icons.account_balance_wallet_outlined), findsOneWidget);
+      expect(
+          find.byIcon(Icons.account_balance_wallet_outlined), findsOneWidget);
     });
 
     testWidgets('shows supported wallet chips', (tester) async {
       await tester.pumpWidget(_buildScreen(MockWalletService()));
-      expect(find.text('Phantom'),    findsOneWidget);
-      expect(find.text('Solflare'),   findsOneWidget);
+      expect(find.text('Phantom'), findsOneWidget);
+      expect(find.text('Solflare'), findsOneWidget);
       expect(find.text('Seed Vault'), findsOneWidget);
     });
 
@@ -92,7 +103,7 @@ void main() {
     testWidgets('shows Connecting… spinner while awaiting result',
         (tester) async {
       final svc = MockWalletService(
-        result: null,                        // resolves to null (cancel)
+        result: null, // resolves to null (cancel)
         delay: const Duration(seconds: 10),
       );
 
@@ -148,7 +159,8 @@ void main() {
       expect(btn.onPressed, isNotNull);
     });
 
-    testWidgets('can retry — connect() called again after failure', (tester) async {
+    testWidgets('can retry — connect() called again after failure',
+        (tester) async {
       final svc = MockWalletService(result: null);
       await tester.pumpWidget(_buildScreen(svc));
 
@@ -167,8 +179,9 @@ void main() {
 
   group('WalletConnectScreen — success state', () {
     testWidgets('shows "Connected as …" confirmation text', (tester) async {
-      final formatted = WalletUtils.formatAddress(_testAddress); // "4Nd1...nEKL"
-      final svc       = MockWalletService(result: _testResult);
+      final formatted =
+          WalletUtils.formatAddress(_testAddress); // "4Nd1...nEKL"
+      final svc = MockWalletService(result: _testResult);
 
       await tester.pumpWidget(_buildScreen(svc));
       await tester.tap(find.text('CONNECT WALLET'));
@@ -180,7 +193,8 @@ void main() {
     });
 
     testWidgets('connect() is called exactly once per tap', (tester) async {
-      final svc = MockWalletService(result: null); // instant failure, no navigation
+      final svc =
+          MockWalletService(result: null); // instant failure, no navigation
       await tester.pumpWidget(_buildScreen(svc));
       await tester.tap(find.text('CONNECT WALLET'));
       await _pumpUntilConnectResolves(tester);

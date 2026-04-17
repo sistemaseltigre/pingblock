@@ -32,6 +32,16 @@ const GAME = {
   POWER_DURATION_MS: 3_000,
 };
 
+const WAGER = {
+  // 10% protocol treasury, 90% winner
+  TREASURY_BPS: 1000,
+  BPS_DENOMINATOR: 10_000,
+
+  // Guardrails for devnet (adjust per environment)
+  MIN_LAMPORTS: 1_000_000,       // 0.001 SOL
+  MAX_LAMPORTS: 5_000_000_000,   // 5 SOL
+};
+
 const PADDLE_TYPES = {
   PHOENIX: 'phoenix',   // +50% ball speed on hit
   FROST:   'frost',     // -40% ball speed on hit
@@ -43,6 +53,8 @@ const PADDLE_TYPES = {
 const EVENTS = {
   // Client → Server
   JOIN_LOBBY:      'join_lobby',
+  JOIN_WAGER_LOBBY:'join_wager_lobby',
+  CANCEL_WAGER_SEARCH: 'cancel_wager_search',
   JOIN_VS_CPU:     'join_vs_cpu',   // debug: play against AI
   PADDLE_MOVE:     'paddle_move',
   USE_POWER:       'use_power',
@@ -50,7 +62,9 @@ const EVENTS = {
 
   // Server → Client
   LOBBY_JOINED:    'lobby_joined',
+  WAGER_LOBBY_JOINED: 'wager_lobby_joined',
   MATCH_FOUND:     'match_found',
+  WAGER_MATCH_FOUND: 'wager_match_found',
   GAME_START:      'game_start',
   GAME_STATE:      'game_state',
   SCORE_UPDATE:    'score_update',
@@ -58,9 +72,14 @@ const EVENTS = {
   POWER_EXPIRED:   'power_expired',
   GAME_OVER:       'game_over',
   OPPONENT_LEFT:   'opponent_left',
+  WAGER_REFUND_PENDING: 'wager_refund_pending',
+  WAGER_REFUND_DONE: 'wager_refund_done',
+  WAGER_SETTLEMENT_PENDING: 'wager_settlement_pending',
+  WAGER_SETTLEMENT_DONE: 'wager_settlement_done',
+  WAGER_ERROR: 'wager_error',
   ERROR:           'error',
 };
 
 const AI_DIFFICULTIES = ['easy', 'medium', 'hard'];
 
-module.exports = { GAME, PADDLE_TYPES, EVENTS, AI_DIFFICULTIES };
+module.exports = { GAME, WAGER, PADDLE_TYPES, EVENTS, AI_DIFFICULTIES };

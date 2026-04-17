@@ -8,6 +8,15 @@ import 'package:pingblock_game/services/wallet_service.dart';
 class _MockWalletService implements WalletService {
   @override
   Future<WalletConnectionResult?> connect() async => null;
+
+  @override
+  Future<int?> getBalanceLamports(String walletAddress) async => null;
+
+  @override
+  Future<String?> signAndSendTransactionBase64({
+    required String transactionBase64,
+  }) async =>
+      null;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -18,7 +27,7 @@ void main() {
     await tester.pump();
 
     // The wallet connect screen should show the title and the connect button.
-    expect(find.text('PING\nBLOCK'),       findsOneWidget);
-    expect(find.text('CONNECT WALLET'),    findsOneWidget);
+    expect(find.text('PING\nBLOCK'), findsOneWidget);
+    expect(find.text('CONNECT WALLET'), findsOneWidget);
   });
 }

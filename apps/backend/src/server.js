@@ -19,6 +19,22 @@ app.use(express.json());
 // Health check
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
 
+app.post('/wager/prepare-escrow', async (req, res) => {
+  const { wallet, lamports, intentId } = req.body || {};
+  try {
+    const prepared = await gm.wagerCustody.prepareEscrowTransaction({
+      wallet,
+      lamports,
+      intentId,
+    });
+    return res.json(prepared);
+  } catch (e) {
+    return res.status(400).json({
+      error: e.message || String(e),
+    });
+  }
+});
+
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -36,6 +52,41 @@ io.on('connection', (socket) => {
   socket.on(EVENTS.JOIN_LOBBY, ({ name } = {}) => {
     console.log(`[~] join_lobby ${socket.id} name=${name}`);
     gm.joinLobby(socket, name);
+  });
+
+  socket.on(
+    EVENTS.JOIN_WAGER_LOBBY,
+    async ({ name, wallet, lamports, escrowTxSig, intentId } = {}) => {
+    console.log(
+      `[~] join_wager_lobby ${socket.id} name=${name} wallet=${wallet} lamports=${lamports} intentId=${intentId}`,
+    );
+    try {
+      await gm.joinWagerLobby(socket, {
+        playerName: name,
+        wallet,
+        lamports,
+        escrowTxSig,
+        intentId,
+      });
+    } catch (e) {
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'JOIN_WAGER_FAILED',
+        message: e.message || String(e),
+      });
+    }
+    },
+  );
+
+  socket.on(EVENTS.CANCEL_WAGER_SEARCH, async () => {
+    console.log(`[~] cancel_wager_search ${socket.id}`);
+    try {
+      await gm.cancelWagerSearch(socket);
+    } catch (e) {
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'CANCEL_WAGER_FAILED',
+        message: e.message || String(e),
+      });
+    }
   });
 
   socket.on(EVENTS.JOIN_VS_CPU, ({ name, difficulty } = {}) => {

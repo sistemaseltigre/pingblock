@@ -65,3 +65,9 @@
 | Landscape orientation locked | Standard ping pong layout; better on mobile |
 | Paddle powers via VRF | Fairness — randomness provably on-chain |
 | Flame 1.20 | Stable, well-documented, collision detection built-in |
+
+---
+
+## Additional Planning Docs
+- Betting mode plan and tracking: `BETTING_MODE_TRACKING.md`
+- Wager technical contract (Phase A): `docs/PHASE_A_WAGER_SPEC.md`

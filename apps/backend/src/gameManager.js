@@ -2,14 +2,16 @@
 'use strict';
 
 const { v4: uuidv4 } = require('uuid');
-const { GAME, PADDLE_TYPES, EVENTS, AI_DIFFICULTIES } = require('./constants');
+const { GAME, WAGER, PADDLE_TYPES, EVENTS, AI_DIFFICULTIES } = require('./constants');
 const { stepBall, initialBall, initialPaddle } = require('./physics');
 const { AiPlayer } = require('./aiPlayer');
+const { isValidWagerAmountLamports } = require('./wagerRules');
+const { WagerCustodyService } = require('./wagerCustodyService');
 
 const ALL_PADDLE_TYPES = Object.values(PADDLE_TYPES);
 
 class GameManager {
-  constructor(io) {
+  constructor(io, opts = {}) {
     this.io = io;
     /** @type {Map<string, Room>} roomId → Room */
     this.rooms = new Map();
@@ -17,6 +19,15 @@ class GameManager {
     this.queue = [];
     /** @type {Map<string, string>} socketId → roomId */
     this.playerRoom = new Map();
+    /** @type {Map<number, string[]>} lamports bucket -> socketId[] */
+    this.wagerQueues = new Map();
+  /** @type {Map<string, {wallet:string, lamports:number, escrowTxSig:string, intentId:string|number, joinedAt:number}>} */
+    this.wagerEntries = new Map();
+    /** @type {Map<string, number>} socketId -> lamports bucket */
+    this.socketWagerBucket = new Map();
+    /** @type {Map<string, {wagerId:string, lamportsEach:number, potLamports:number, settled:boolean}>} */
+    this.roomWagers = new Map();
+    this.wagerCustody = opts.wagerCustody || new WagerCustodyService();
   }
 
   // ── Matchmaking ─────────────────────────────────────────────────────────
@@ -39,6 +50,100 @@ class GameManager {
       const [idA, idB] = this.queue.splice(0, 2);
       this._createRoom(idA, idB);
     }
+  }
+
+  async joinWagerLobby(socket, { playerName, wallet, lamports, escrowTxSig, intentId }) {
+    if (this.playerRoom.has(socket.id)) {
+      socket.emit(EVENTS.WAGER_ERROR, { code: 'ALREADY_IN_GAME', message: 'Already in a game' });
+      return;
+    }
+    if (this.queue.includes(socket.id) || this.socketWagerBucket.has(socket.id)) {
+      socket.emit(EVENTS.WAGER_ERROR, { code: 'ALREADY_IN_QUEUE', message: 'Already in queue' });
+      return;
+    }
+    if (!wallet || typeof wallet !== 'string') {
+      socket.emit(EVENTS.WAGER_ERROR, { code: 'INVALID_WALLET', message: 'Wallet is required' });
+      return;
+    }
+    if (!isValidWagerAmountLamports(lamports, WAGER.MIN_LAMPORTS, WAGER.MAX_LAMPORTS)) {
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'INVALID_WAGER_AMOUNT',
+        message: `Wager must be between ${WAGER.MIN_LAMPORTS} and ${WAGER.MAX_LAMPORTS} lamports`,
+      });
+      return;
+    }
+    if (intentId == null || `${intentId}`.trim() === '') {
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'INVALID_INTENT_ID',
+        message: 'intentId is required for escrow verification',
+      });
+      return;
+    }
+
+    const verified = await this.wagerCustody.verifyEscrow({
+      wallet,
+      lamports,
+      escrowTxSig,
+      intentId,
+    });
+    if (!verified) {
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'WAGER_ESCROW_NOT_VERIFIED',
+        message: 'Escrow transaction could not be verified for this wallet/amount.',
+      });
+      return;
+    }
+
+    socket.data.playerName = playerName || `Player_${socket.id.slice(0, 4)}`;
+    socket.data.wallet = wallet;
+
+    if (!this.wagerQueues.has(lamports)) this.wagerQueues.set(lamports, []);
+    const bucket = this.wagerQueues.get(lamports);
+    bucket.push(socket.id);
+
+    this.wagerEntries.set(socket.id, {
+      wallet,
+      lamports,
+      escrowTxSig,
+      intentId,
+      joinedAt: Date.now(),
+    });
+    this.socketWagerBucket.set(socket.id, lamports);
+
+    socket.emit(EVENTS.WAGER_LOBBY_JOINED, {
+      position: bucket.length,
+      lamports,
+    });
+
+    if (bucket.length >= 2) {
+      const [idA, idB] = bucket.splice(0, 2);
+      await this._createWagerRoom(idA, idB, lamports);
+    }
+  }
+
+  async cancelWagerSearch(socket) {
+    const bucketLamports = this.socketWagerBucket.get(socket.id);
+    const entry = this.wagerEntries.get(socket.id);
+    if (!entry || bucketLamports == null) {
+      socket.emit(EVENTS.WAGER_ERROR, { code: 'NOT_IN_WAGER_QUEUE', message: 'Not in wager queue' });
+      return;
+    }
+
+    const bucket = this.wagerQueues.get(bucketLamports);
+    if (bucket) {
+      const i = bucket.indexOf(socket.id);
+      if (i !== -1) bucket.splice(i, 1);
+    }
+
+    this.socketWagerBucket.delete(socket.id);
+    this.wagerEntries.delete(socket.id);
+
+    socket.emit(EVENTS.WAGER_REFUND_PENDING, {});
+    const refund = await this.wagerCustody.refundSearchCancel(entry);
+    socket.emit(EVENTS.WAGER_REFUND_DONE, {
+      refundTxSig: refund.refundTxSig,
+      lamports: entry.lamports,
+    });
   }
 
   /**
@@ -151,6 +256,100 @@ class GameManager {
     };
 
     this.io.to(roomId).emit(EVENTS.MATCH_FOUND, matchPayload);
+
+    setTimeout(() => this._startGame(roomId), 3000);
+  }
+
+  async _createWagerRoom(idA, idB, lamportsEach) {
+    const roomId = uuidv4();
+    const wagerId = uuidv4();
+    const sockA = this.io.sockets.sockets.get(idA);
+    const sockB = this.io.sockets.sockets.get(idB);
+    const entryA = this.wagerEntries.get(idA);
+    const entryB = this.wagerEntries.get(idB);
+
+    if (!sockA || !sockB || !entryA || !entryB) return;
+
+    const paddleA = randomPaddleType();
+    const paddleB = randomPaddleType();
+
+    const room = {
+      id: roomId,
+      players: {
+        left: {
+          id: idA,
+          name: sockA.data.playerName,
+          score: 0,
+          paddleType: paddleA,
+          powerCooldownUntil: 0,
+          wallet: entryA.wallet,
+        },
+        right: {
+          id: idB,
+          name: sockB.data.playerName,
+          score: 0,
+          paddleType: paddleB,
+          powerCooldownUntil: 0,
+          wallet: entryB.wallet,
+        },
+      },
+      ball: initialBall(),
+      paddles: {
+        left: initialPaddle('left'),
+        right: initialPaddle('right'),
+      },
+      activePowers: { left: null, right: null },
+      interval: null,
+      lastTick: Date.now(),
+      started: false,
+      aiPlayer: null,
+      aiSide: null,
+      isCpuGame: false,
+      isWagerGame: true,
+    };
+
+    this.rooms.set(roomId, room);
+    this.playerRoom.set(idA, roomId);
+    this.playerRoom.set(idB, roomId);
+    this.roomWagers.set(roomId, {
+      wagerId,
+      lamportsEach,
+      potLamports: lamportsEach * 2,
+      settled: false,
+    });
+
+    this.socketWagerBucket.delete(idA);
+    this.socketWagerBucket.delete(idB);
+    this.wagerEntries.delete(idA);
+    this.wagerEntries.delete(idB);
+
+    sockA.join(roomId);
+    sockB.join(roomId);
+
+    const matchPayload = {
+      roomId,
+      vscpu: false,
+      left: { name: room.players.left.name, paddleType: paddleA },
+      right: { name: room.players.right.name, paddleType: paddleB },
+    };
+
+    this.io.to(roomId).emit(EVENTS.MATCH_FOUND, matchPayload);
+    this.io.to(roomId).emit(EVENTS.WAGER_MATCH_FOUND, {
+      wagerId,
+      roomId,
+      left: {
+        name: room.players.left.name,
+        paddleType: paddleA,
+        wallet: room.players.left.wallet,
+      },
+      right: {
+        name: room.players.right.name,
+        paddleType: paddleB,
+        wallet: room.players.right.wallet,
+      },
+      lamportsEach,
+      potLamports: lamportsEach * 2,
+    });
 
     setTimeout(() => this._startGame(roomId), 3000);
   }
@@ -304,12 +503,39 @@ class GameManager {
       },
     });
 
-    this._cleanRoom(roomId);
+    if (!room.isWagerGame) {
+      this._cleanRoom(roomId);
+      return;
+    }
+
+    this._settleWagerRoom(roomId, winner)
+      .catch((e) => {
+        this.io.to(roomId).emit(EVENTS.WAGER_ERROR, {
+          code: 'SETTLEMENT_FAILED',
+          message: `Settlement failed: ${e.message || e}`,
+        });
+      })
+      .finally(() => this._cleanRoom(roomId));
   }
 
   playerDisconnected(socketId) {
     const qi = this.queue.indexOf(socketId);
     if (qi !== -1) this.queue.splice(qi, 1);
+
+    // Wager queue disconnect => refund
+    const wagerBucket = this.socketWagerBucket.get(socketId);
+    const wagerEntry = this.wagerEntries.get(socketId);
+    if (wagerBucket != null && wagerEntry) {
+      const bucket = this.wagerQueues.get(wagerBucket);
+      if (bucket) {
+        const i = bucket.indexOf(socketId);
+        if (i !== -1) bucket.splice(i, 1);
+      }
+      this.socketWagerBucket.delete(socketId);
+      this.wagerEntries.delete(socketId);
+
+      this.wagerCustody.refundSearchCancel(wagerEntry).catch(() => {});
+    }
 
     const roomId = this.playerRoom.get(socketId);
     if (!roomId) return;
@@ -324,7 +550,21 @@ class GameManager {
       this.io.to(roomId).emit(EVENTS.OPPONENT_LEFT, {});
     }
 
-    this._cleanRoom(roomId);
+    if (!room.isWagerGame) {
+      this._cleanRoom(roomId);
+      return;
+    }
+
+    // Disconnect in matched game counts as loss for quitter.
+    const quitterSide = this._sideOf(socketId, room);
+    if (!quitterSide) {
+      this._cleanRoom(roomId);
+      return;
+    }
+    const winnerSide = quitterSide === 'left' ? 'right' : 'left';
+    this._settleWagerRoom(roomId, winnerSide)
+      .catch(() => {})
+      .finally(() => this._cleanRoom(roomId));
   }
 
   _cleanRoom(roomId) {
@@ -333,6 +573,7 @@ class GameManager {
     for (const p of ['left', 'right']) {
       this.playerRoom.delete(room.players[p].id);
     }
+    this.roomWagers.delete(roomId);
     this.rooms.delete(roomId);
   }
 
@@ -354,6 +595,40 @@ class GameManager {
   getRoom(roomId)     { return this.rooms.get(roomId); }
   getRoomOf(socketId) { return this.rooms.get(this.playerRoom.get(socketId)); }
   getQueue()          { return [...this.queue]; }
+  getWagerQueue(lamports) { return [...(this.wagerQueues.get(lamports) || [])]; }
+
+  async _settleWagerRoom(roomId, winnerSide) {
+    const room = this.rooms.get(roomId);
+    const wager = this.roomWagers.get(roomId);
+    if (!room || !wager || wager.settled) return;
+
+    wager.settled = true;
+    const winnerWallet = room.players[winnerSide]?.wallet;
+    const loserWallet = room.players[winnerSide === 'left' ? 'right' : 'left']?.wallet;
+    if (!winnerWallet || !loserWallet) {
+      this.io.to(roomId).emit(EVENTS.WAGER_ERROR, {
+        code: 'MISSING_WALLETS',
+        message: 'Missing wallet info for wager settlement',
+      });
+      return;
+    }
+
+    this.io.to(roomId).emit(EVENTS.WAGER_SETTLEMENT_PENDING, { wagerId: wager.wagerId });
+    const settlement = await this.wagerCustody.settleMatch({
+      wagerId: wager.wagerId,
+      lamportsEach: wager.lamportsEach,
+      winnerWallet,
+      loserWallet,
+    });
+
+    this.io.to(roomId).emit(EVENTS.WAGER_SETTLEMENT_DONE, {
+      wagerId: settlement.wagerId,
+      winnerWallet: settlement.winnerWallet,
+      winnerLamports: settlement.winnerLamports.toString(),
+      treasuryLamports: settlement.treasuryLamports.toString(),
+      settlementTxSig: settlement.settlementTxSig,
+    });
+  }
 }
 
 function randomPaddleType() {

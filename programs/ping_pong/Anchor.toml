@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-ping_pong = "PingPongXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+ping_pong = "Bcdp7uboxycoo6ApoMvnRDUoxKdVH4VvDPn1HLY7VYUR"
 
 [registry]
 url = "https://api.apr.dev"

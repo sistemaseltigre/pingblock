@@ -16,16 +16,16 @@ class WalletConnectScreen extends StatefulWidget {
 
 class _WalletConnectScreenState extends State<WalletConnectScreen>
     with SingleTickerProviderStateMixin {
-  bool   _connecting    = false;
+  bool _connecting = false;
   String _statusMessage = '';
-  bool   _hasError      = false;
+  bool _hasError = false;
 
   /// Cancellable timer for the brief "Connected as …" confirmation pause.
   /// Cancelled in dispose() so the test host never sees a pending timer.
   Timer? _navTimer;
 
   late AnimationController _pulseController;
-  late Animation<double>   _pulseAnimation;
+  late Animation<double> _pulseAnimation;
 
   @override
   void initState() {
@@ -50,9 +50,9 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
 
   Future<void> _connect() async {
     setState(() {
-      _connecting    = true;
+      _connecting = true;
       _statusMessage = 'Opening wallet…';
-      _hasError      = false;
+      _hasError = false;
     });
 
     final result = await widget.walletService.connect();
@@ -61,9 +61,9 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
 
     if (result == null) {
       setState(() {
-        _connecting    = false;
+        _connecting = false;
         _statusMessage = 'Connection cancelled or failed. Please try again.';
-        _hasError      = true;
+        _hasError = true;
       });
       return;
     }
@@ -71,7 +71,7 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
     final displayName = WalletUtils.formatAddress(result.address);
 
     setState(() {
-      _connecting    = false;
+      _connecting = false;
       _statusMessage = 'Connected as $displayName';
     });
 
@@ -84,7 +84,15 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
         MaterialPageRoute(
           builder: (_) => LobbyScreen(
             walletAddress: result.address,
-            displayName:   displayName,
+            displayName: displayName,
+            walletBalanceLamportsProvider: (walletAddress) =>
+                widget.walletService.getBalanceLamports(walletAddress),
+            escrowTransactionSender: ({
+              required String transactionBase64,
+            }) =>
+                widget.walletService.signAndSendTransactionBase64(
+              transactionBase64: transactionBase64,
+            ),
           ),
         ),
       );
@@ -104,7 +112,6 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-
                 // ── Logo ──────────────────────────────────────────────────
                 ShaderMask(
                   shaderCallback: (b) => const LinearGradient(
@@ -139,7 +146,7 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
                 ScaleTransition(
                   scale: _pulseAnimation,
                   child: Container(
-                    width:  100,
+                    width: 100,
                     height: 100,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
@@ -172,7 +179,8 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
                 const Text(
                   'Your wallet address will be used as\nyour in-game identity.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white38, fontSize: 13, height: 1.5),
+                  style: TextStyle(
+                      color: Colors.white38, fontSize: 13, height: 1.5),
                 ),
 
                 const SizedBox(height: 36),
@@ -273,7 +281,8 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
                 const SizedBox(height: 8),
                 const Text(
                   'Any MWA-compatible wallet works',
-                  style: TextStyle(color: Colors.white24, fontSize: 10, letterSpacing: 1),
+                  style: TextStyle(
+                      color: Colors.white24, fontSize: 10, letterSpacing: 1),
                 ),
               ],
             ),
