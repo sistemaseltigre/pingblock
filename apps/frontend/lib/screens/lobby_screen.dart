@@ -17,6 +17,9 @@ typedef WalletBalanceLamportsProvider = Future<int?> Function(
 typedef EscrowTransactionSender = Future<String?> Function({
   required String transactionBase64,
 });
+/// Called after signing; polls until the tx is confirmed on-chain.
+/// Returns true if confirmed, false on timeout or on-chain error.
+typedef TransactionConfirmer = Future<bool> Function(String signature);
 
 class LobbyScreen extends StatefulWidget {
   /// Full base58 wallet address (e.g. "4Nd1mBQtrMJVYVfKf2PX98AeguLmasRF3zjeA3FEnEKL").
@@ -34,6 +37,10 @@ class LobbyScreen extends StatefulWidget {
   /// Optional sender for a prepared base64 transaction.
   final EscrowTransactionSender? escrowTransactionSender;
 
+  /// Polls Solana RPC until the transaction is confirmed on-chain.
+  /// If null, confirmation is skipped (useful for mock/test flows).
+  final TransactionConfirmer? transactionConfirmer;
+
   const LobbyScreen({
     super.key,
     required this.walletAddress,
@@ -41,6 +48,7 @@ class LobbyScreen extends StatefulWidget {
     this.socketService,
     this.walletBalanceLamportsProvider,
     this.escrowTransactionSender,
+    this.transactionConfirmer,
   });
 
   @override
@@ -65,6 +73,10 @@ class _LobbyScreenState extends State<LobbyScreen> {
   int? _activeWagerLamports;
   final _wagerApi = WagerApiService();
 
+  // Inline wager input — avoids dialog/Navigator issues on Android.
+  late final TextEditingController _wagerController;
+  String? _wagerError;
+
   static const _difficulties = ['easy', 'medium', 'hard'];
   static const _difficultyLabels = {
     'easy': 'Easy   — 40% reaction, imperfect aim',
@@ -79,6 +91,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
     // The display name comes from the wallet — it is read-only and cannot
     // be changed by the user.
     _nameController = TextEditingController(text: widget.displayName);
+    _wagerController = TextEditingController(text: '0.05');
     _connectAndSetup();
   }
 
@@ -204,8 +217,25 @@ class _LobbyScreenState extends State<LobbyScreen> {
     _socket.joinLobby(name);
   }
 
+  /// Validates the inline wager input. Sets [_wagerError] and returns null on
+  /// failure, or returns the lamport value on success.
+  int? _parseWagerInput() {
+    final text = _wagerController.text;
+    debugPrint('[PingBlock] _parseWagerInput: text="$text"');
+    final parsed = WagerAmountParser.parseSolToLamports(text);
+    if (!parsed.isValid) {
+      debugPrint('[PingBlock] _parseWagerInput: invalid — ${parsed.error}');
+      setState(() => _wagerError = parsed.error);
+      return null;
+    }
+    debugPrint('[PingBlock] _parseWagerInput: valid — ${parsed.lamports} lamports');
+    setState(() => _wagerError = null);
+    return parsed.lamports!;
+  }
+
   Future<void> _findWagerMatch() async {
-    final lamports = await _promptWagerLamports();
+    debugPrint('[PingBlock] _findWagerMatch: tapped');
+    final lamports = _parseWagerInput();
     if (lamports == null || !mounted) return;
 
     setState(() {
@@ -220,16 +250,35 @@ class _LobbyScreenState extends State<LobbyScreen> {
         return;
       }
 
+      debugPrint('[PingBlock] _findWagerMatch: calling prepareEscrow ($lamports lamports)');
       final prepared = await _wagerApi.prepareEscrow(
         walletAddress: widget.walletAddress,
         lamports: lamports,
       );
+      debugPrint('[PingBlock] _findWagerMatch: prepareEscrow OK — intentId=${prepared.intentId}');
+
       final escrowSig = await _sendPreparedEscrowTransaction(prepared.txBase64);
+      debugPrint('[PingBlock] _findWagerMatch: escrowSig=$escrowSig');
       if (!mounted) return;
       if (escrowSig == null) {
         setState(() {
           _busyWagerFlow = false;
           _status = 'Escrow transaction was cancelled or failed';
+        });
+        return;
+      }
+
+      // Wait for the escrow to land on-chain before joining the queue.
+      final confirmed = await _awaitOnChainConfirmation(escrowSig);
+      if (!mounted) return;
+      if (!confirmed) {
+        _showWagerError(
+          'Escrow transaction was not confirmed on-chain.\n'
+          'Signature: $escrowSig',
+        );
+        setState(() {
+          _busyWagerFlow = false;
+          _status = 'Escrow confirmation failed — check your wallet';
         });
         return;
       }
@@ -241,7 +290,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
         _searching = true;
         _activeWagerLamports = lamports;
         _status =
-            'Escrow signed (${WagerAmountParser.lamportsToSolText(lamports)} SOL). Joining wager queue...';
+            'Escrow confirmed ✓ (${WagerAmountParser.lamportsToSolText(lamports)} SOL). Joining wager queue...';
       });
 
       _socket.joinWagerLobby(
@@ -251,14 +300,138 @@ class _LobbyScreenState extends State<LobbyScreen> {
         escrowTxSig: escrowSig,
         intentId: prepared.intentId,
       );
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[PingBlock] _findWagerMatch ERROR: $e\n$st');
       if (!mounted) return;
+      _showWagerError(e.toString());
       setState(() {
         _busyWagerFlow = false;
         _searching = false;
-        _status = 'Failed to start wager flow';
+        _status = 'Wager error — see details above';
       });
     }
+  }
+
+  /// Runs the full on-chain escrow flow then immediately starts a CPU game.
+  /// Use this to verify the blockchain wager integration end-to-end without
+  /// needing a second human player.
+  Future<void> _wagerVsCpu() async {
+    debugPrint('[PingBlock] _wagerVsCpu: tapped');
+    final lamports = _parseWagerInput();
+    if (lamports == null || !mounted) return;
+
+    setState(() {
+      _busyWagerFlow = true;
+      _status = 'Preparing wager escrow...';
+    });
+
+    try {
+      final hasBalance = await _validateBalanceIfPossible(lamports);
+      if (!mounted || !hasBalance) {
+        setState(() => _busyWagerFlow = false);
+        return;
+      }
+
+      debugPrint('[PingBlock] _wagerVsCpu: calling prepareEscrow ($lamports lamports)');
+      final prepared = await _wagerApi.prepareEscrow(
+        walletAddress: widget.walletAddress,
+        lamports: lamports,
+      );
+      debugPrint('[PingBlock] _wagerVsCpu: prepareEscrow OK — intentId=${prepared.intentId}');
+
+      final escrowSig = await _sendPreparedEscrowTransaction(prepared.txBase64);
+      debugPrint('[PingBlock] _wagerVsCpu: escrowSig=$escrowSig');
+      if (!mounted) return;
+      if (escrowSig == null) {
+        setState(() {
+          _busyWagerFlow = false;
+          _status = 'Escrow transaction was cancelled or failed';
+        });
+        _showWagerError('Wallet signing was cancelled or returned no signature.');
+        return;
+      }
+
+      // Wait for the escrow to land on-chain before starting the game.
+      final confirmed = await _awaitOnChainConfirmation(escrowSig);
+      if (!mounted) return;
+      if (!confirmed) {
+        _showWagerError(
+          'Escrow transaction was not confirmed on-chain.\n'
+          'Signature: $escrowSig',
+        );
+        setState(() {
+          _busyWagerFlow = false;
+          _status = 'Escrow confirmation failed — check your wallet';
+        });
+        return;
+      }
+
+      final name =
+          widget.displayName.isNotEmpty ? widget.displayName : 'Player';
+      debugPrint('[PingBlock] _wagerVsCpu: escrow confirmed on-chain — joining CPU game as "$name"');
+      setState(() {
+        _busyWagerFlow = false;
+        _searching = true;
+        _activeWagerLamports = lamports;
+        _status =
+            'Escrow confirmed ✓ (${WagerAmountParser.lamportsToSolText(lamports)} SOL). Starting CPU game...';
+      });
+
+      // Wager escrow is confirmed on-chain. Start a CPU game to verify the
+      // full blockchain flow end-to-end without needing a second player.
+      _socket.joinVsCpu(name, _selectedDifficulty);
+    } catch (e, st) {
+      debugPrint('[PingBlock] _wagerVsCpu ERROR: $e\n$st');
+      if (!mounted) return;
+      _showWagerError(e.toString());
+      setState(() {
+        _busyWagerFlow = false;
+        _searching = false;
+        _status = 'Wager error — see details above';
+      });
+    }
+  }
+
+  /// Updates the status label to show a confirmation spinner, then polls until
+  /// the transaction is confirmed on-chain (or [transactionConfirmer] is null,
+  /// in which case it skips and returns true immediately for mock flows).
+  Future<bool> _awaitOnChainConfirmation(String signature) async {
+    final confirmer = widget.transactionConfirmer;
+    if (confirmer == null) {
+      // No confirmer injected (mock/test mode) — skip polling.
+      debugPrint('[PingBlock] _awaitOnChainConfirmation: no confirmer, skipping');
+      return true;
+    }
+
+    debugPrint('[PingBlock] _awaitOnChainConfirmation: polling for $signature');
+    if (mounted) {
+      setState(() => _status =
+          'Confirming escrow on Solana devnet...\n${signature.substring(0, 8)}...${signature.substring(signature.length - 8)}');
+    }
+
+    final confirmed = await confirmer(signature);
+    debugPrint('[PingBlock] _awaitOnChainConfirmation: confirmed=$confirmed');
+    return confirmed;
+  }
+
+  /// Shows a prominent SnackBar with the raw error so it's easy to diagnose.
+  void _showWagerError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(fontSize: 13),
+        ),
+        backgroundColor: Colors.redAccent.shade700,
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: 'DISMISS',
+          textColor: Colors.white,
+          onPressed: () =>
+              ScaffoldMessenger.of(context).hideCurrentSnackBar(),
+        ),
+      ),
+    );
   }
 
   Future<void> _cancelWagerSearch() async {
@@ -303,103 +476,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
     return 'mock_escrow_${DateTime.now().millisecondsSinceEpoch}_${max(1, txBase64.length % 999999)}';
   }
 
-  Future<int?> _promptWagerLamports() async {
-    final controller = TextEditingController(text: '0.05');
-    String? error;
-
-    final result = await showDialog<int>(
-      context: context,
-      barrierDismissible: !_busyWagerFlow,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            final preview =
-                WagerAmountParser.parseSolToLamports(controller.text);
-            final validLamports = preview.lamports;
-            final potText = validLamports == null
-                ? '-'
-                : WagerAmountParser.lamportsToSolText(validLamports * 2);
-            final winnerText = validLamports == null
-                ? '-'
-                : WagerAmountParser.lamportsToSolText(
-                    (validLamports * 18) ~/ 10);
-            final treasuryText = validLamports == null
-                ? '-'
-                : WagerAmountParser.lamportsToSolText(
-                    (validLamports * 2) ~/ 10);
-
-            return AlertDialog(
-              backgroundColor: const Color(0xFF141427),
-              title: const Text(
-                'Wager Amount (SOL)',
-                style: TextStyle(color: Colors.white),
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: controller,
-                    autofocus: true,
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
-                    inputFormatters: [
-                      FilteringTextInputFormatter.allow(
-                          RegExp(r'^\d*\.?\d{0,9}$')),
-                    ],
-                    decoration: InputDecoration(
-                      hintText: '0.05',
-                      labelText: 'Amount',
-                      suffixText: 'SOL',
-                      errorText: error,
-                    ),
-                    onChanged: (_) {
-                      setDialogState(() {
-                        error = null;
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  _WagerPreviewLine(
-                      label: 'Estimated pot', value: '$potText SOL'),
-                  _WagerPreviewLine(
-                      label: 'Winner payout (90%)', value: '$winnerText SOL'),
-                  _WagerPreviewLine(
-                      label: 'Treasury (10%)', value: '$treasuryText SOL'),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    final parsed =
-                        WagerAmountParser.parseSolToLamports(controller.text);
-                    if (!parsed.isValid) {
-                      setDialogState(() {
-                        error = parsed.error;
-                      });
-                      return;
-                    }
-                    Navigator.of(context).pop(parsed.lamports);
-                  },
-                  child: const Text('Confirm'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    controller.dispose();
-    return result;
-  }
 
   @override
   void dispose() {
     _nameController.dispose();
+    _wagerController.dispose();
     // Only disconnect if we're truly leaving (not transitioning into a game)
     if (!_navigatedToGame) _socket.disconnect();
     super.dispose();
@@ -608,18 +689,118 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     ),
                   ),
                 ] else ...[
+                  // ── Inline wager amount input (no dialog) ──────────────────
+                  _WagerInputSection(
+                    controller: _wagerController,
+                    error: _wagerError,
+                    enabled: !controlsDisabled,
+                    onChanged: (_) => setState(() => _wagerError = null),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  // PvP wager button
                   _PrimaryButton(
                     label: _busyWagerFlow
                         ? 'PREPARING ESCROW...'
-                        : 'SET SOL WAGER',
+                        : 'FIND WAGER MATCH',
                     icon: Icons.local_atm,
                     color: const Color(0xFF14B8A6),
                     loading: _busyWagerFlow,
                     onPressed: controlsDisabled ? null : _findWagerMatch,
                   ),
-                  const SizedBox(height: 10),
-                  if (_activeWagerLamports != null)
+
+                  const SizedBox(height: 8),
+
+                  // CPU wager section — for testing the blockchain flow
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOut,
+                    child: Column(
+                      children: [
+                        GestureDetector(
+                          onTap: controlsDisabled
+                              ? null
+                              : () => setState(() =>
+                                  _showCpuOptions = !_showCpuOptions),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                                vertical: 12, horizontal: 16),
+                            decoration: BoxDecoration(
+                              color: _showCpuOptions
+                                  ? const Color(0xFF9945FF)
+                                      .withValues(alpha: 0.08)
+                                  : Colors.transparent,
+                              border: Border.all(
+                                color: _showCpuOptions
+                                    ? const Color(0xFF9945FF)
+                                        .withValues(alpha: 0.4)
+                                    : const Color(0xFF2A2A3A),
+                              ),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.smart_toy_outlined,
+                                  color: _showCpuOptions
+                                      ? const Color(0xFF9945FF)
+                                      : Colors.white38,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Wager vs CPU  (test blockchain)',
+                                    style: TextStyle(
+                                      color: _showCpuOptions
+                                          ? const Color(0xFF9945FF)
+                                          : Colors.white38,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                                Icon(
+                                  _showCpuOptions
+                                      ? Icons.expand_less
+                                      : Icons.expand_more,
+                                  color: Colors.white24,
+                                  size: 18,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (_showCpuOptions) ...[
+                          const SizedBox(height: 10),
+                          ..._difficulties.map((d) => _DifficultyTile(
+                                label: d,
+                                description: _difficultyLabels[d]!,
+                                selected: _selectedDifficulty == d,
+                                onTap: () =>
+                                    setState(() => _selectedDifficulty = d),
+                              )),
+                          const SizedBox(height: 10),
+                          _PrimaryButton(
+                            label: _busyWagerFlow
+                                ? 'PREPARING ESCROW...'
+                                : 'WAGER VS CPU',
+                            icon: Icons.smart_toy,
+                            color: const Color(0xFF9945FF),
+                            loading: _busyWagerFlow,
+                            onPressed:
+                                controlsDisabled ? null : _wagerVsCpu,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+
+                  if (_activeWagerLamports != null) ...[
+                    const SizedBox(height: 10),
                     _WagerInfoCard(lamports: _activeWagerLamports!),
+                  ],
                   if (_searching) ...[
                     const SizedBox(height: 10),
                     OutlinedButton.icon(
@@ -651,6 +832,8 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
   }
 }
+
+// ── Mode selector ──────────────────────────────────────────────────────────
 
 class _ModeSelector extends StatelessWidget {
   final _GameMode selected;
@@ -732,6 +915,121 @@ class _ModeTab extends StatelessWidget {
     );
   }
 }
+
+// ── Inline wager amount input ──────────────────────────────────────────────
+
+/// Renders the SOL wager input and live payout preview directly inside the
+/// lobby screen — no dialog, no Navigator — so there are zero Android
+/// soft-keyboard / context-lifecycle issues.
+class _WagerInputSection extends StatelessWidget {
+  final TextEditingController controller;
+  final String? error;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+
+  const _WagerInputSection({
+    required this.controller,
+    required this.error,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final parsed = WagerAmountParser.parseSolToLamports(controller.text);
+    final v = parsed.lamports;
+    final potText =
+        v == null ? '-' : '${WagerAmountParser.lamportsToSolText(v * 2)} SOL';
+    final winnerText = v == null
+        ? '-'
+        : '${WagerAmountParser.lamportsToSolText((v * 18) ~/ 10)} SOL';
+    final treasuryText = v == null
+        ? '-'
+        : '${WagerAmountParser.lamportsToSolText((v * 2) ~/ 10)} SOL';
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF14B8A6).withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: const Color(0xFF14B8A6).withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'WAGER AMOUNT',
+            style: TextStyle(
+              color: Color(0xFF14B8A6),
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: controller,
+            enabled: enabled,
+            keyboardType:
+                const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(
+                  RegExp(r'^\d*\.?\d{0,9}$')),
+            ],
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+            decoration: InputDecoration(
+              hintText: '0.05',
+              hintStyle: const TextStyle(color: Colors.white24),
+              suffixText: 'SOL',
+              suffixStyle: const TextStyle(color: Color(0xFF14B8A6)),
+              errorText: error,
+              isDense: true,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              enabledBorder: OutlineInputBorder(
+                borderSide: BorderSide(
+                  color: const Color(0xFF14B8A6).withValues(alpha: 0.4),
+                ),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderSide:
+                    const BorderSide(color: Color(0xFF14B8A6), width: 1.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              disabledBorder: OutlineInputBorder(
+                borderSide: const BorderSide(color: Colors.white12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              errorBorder: OutlineInputBorder(
+                borderSide: const BorderSide(color: Colors.redAccent),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              focusedErrorBorder: OutlineInputBorder(
+                borderSide:
+                    const BorderSide(color: Colors.redAccent, width: 1.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onChanged: onChanged,
+          ),
+          const SizedBox(height: 10),
+          _WagerPreviewLine(label: 'Estimated pot', value: potText),
+          _WagerPreviewLine(label: 'Winner payout (90%)', value: winnerText),
+          _WagerPreviewLine(label: 'Treasury (10%)', value: treasuryText),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Wager info card (shown while searching) ────────────────────────────────
 
 class _WagerInfoCard extends StatelessWidget {
   final int lamports;

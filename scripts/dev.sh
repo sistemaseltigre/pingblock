@@ -51,7 +51,7 @@ if lsof -ti:$BACKEND_PORT &>/dev/null; then
 fi
 
 # ── Start backend ─────────────────────────────────────────────────────────────
-info "Starting backend on :$BACKEND_PORT..."
+info "Starting backend on :$BACKEND_PORT  (WAGER_CUSTODY_MODE=onchain)..."
 cd "$ROOT/apps/backend"
 
 # Install if node_modules missing
@@ -60,7 +60,7 @@ if [ ! -d "node_modules" ]; then
   npm install --silent
 fi
 
-node src/server.js > "$LOG_DIR/backend.log" 2>&1 &
+WAGER_CUSTODY_MODE=onchain node src/server.js > "$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo $BACKEND_PID > "$LOG_DIR/backend.pid"
 
@@ -80,17 +80,32 @@ for i in {1..15}; do
 done
 
 # ── ADB port reverse ──────────────────────────────────────────────────────────
-if adb devices 2>/dev/null | grep -q "$DEVICE_ID"; then
-  info "Setting up ADB port reverse: device:$BACKEND_PORT → mac:$BACKEND_PORT"
-  adb -s "$DEVICE_ID" reverse tcp:$BACKEND_PORT tcp:$BACKEND_PORT
-  info "Port forward active ✓  (device can reach backend at localhost:$BACKEND_PORT)"
-else
-  warn "ADB reverse not set — you may need to configure the server IP manually"
+# Always tunnel port $BACKEND_PORT so the app can reach the backend via
+# localhost on the device regardless of which device Flutter picks.
+CONNECTED_DEVICES=$(adb devices 2>/dev/null | grep -v "^List" | grep "device$" | awk '{print $1}')
+REVERSE_OK=false
+
+if [ -n "$CONNECTED_DEVICES" ]; then
+  while IFS= read -r dev; do
+    [ -z "$dev" ] && continue
+    if adb -s "$dev" reverse tcp:$BACKEND_PORT tcp:$BACKEND_PORT 2>/dev/null; then
+      info "ADB reverse OK on $dev  →  device:$BACKEND_PORT tunnels to mac:$BACKEND_PORT ✓"
+      REVERSE_OK=true
+    else
+      warn "ADB reverse failed for $dev"
+    fi
+  done <<< "$CONNECTED_DEVICES"
+fi
+
+if [ "$REVERSE_OK" = false ]; then
+  warn "ADB reverse not set on any device."
+  warn "Backend URL 'http://localhost:$BACKEND_PORT' may not be reachable from the device."
 fi
 
 # ── Flutter run ───────────────────────────────────────────────────────────────
 divider
-info "Launching Flutter app on Seeker..."
+info "Launching Flutter app..."
+info "Backend URL → http://localhost:$BACKEND_PORT  (tunnelled via ADB reverse)"
 echo ""
 cd "$ROOT/apps/frontend"
 
@@ -105,9 +120,16 @@ cleanup() {
   echo ""
   warn "Shutting down..."
   kill $BACKEND_PID 2>/dev/null || true
-  adb -s "$DEVICE_ID" reverse --remove tcp:$BACKEND_PORT 2>/dev/null || true
+  # Remove reverse tunnels from all connected devices
+  if [ -n "$CONNECTED_DEVICES" ]; then
+    while IFS= read -r dev; do
+      [ -z "$dev" ] && continue
+      adb -s "$dev" reverse --remove tcp:$BACKEND_PORT 2>/dev/null || true
+    done <<< "$CONNECTED_DEVICES"
+  fi
   info "Done."
 }
 trap cleanup EXIT INT TERM
 
-flutter run $DEVICE_FLAG --dart-define=BACKEND_URL=http://localhost:$BACKEND_PORT
+flutter run $DEVICE_FLAG \
+  --dart-define=BACKEND_URL=http://localhost:$BACKEND_PORT

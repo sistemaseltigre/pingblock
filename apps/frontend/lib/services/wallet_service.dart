@@ -59,6 +59,17 @@ abstract class WalletService {
     required String transactionBase64,
   }) async =>
       null;
+
+  /// Polls the Solana RPC until [signature] reaches at least 'confirmed'
+  /// status, or until [timeout] elapses.
+  ///
+  /// Returns `true` if the transaction confirmed without an on-chain error,
+  /// `false` on timeout or if the transaction failed on-chain.
+  Future<bool> confirmTransaction(
+    String signature, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async =>
+      false;
 }
 
 // ── Production implementation ───────────────────────────────────────────────
@@ -81,7 +92,11 @@ class MobileWalletAdapterService implements WalletService {
   static const _retryBackoff = Duration(milliseconds: 350);
   static const _associationSettleDelay = Duration(milliseconds: 700);
   static const _maxAttempts = 2;
-  static const _walletActionAttempts = 2;
+  // Sign-and-send must NEVER be retried: if the wallet closes the connection
+  // after submitting (normal MWA behaviour), that looks like a transient error
+  // but the transaction is already on-chain. A second attempt would re-open
+  // the wallet with the same tx bytes and the user would be charged twice.
+  static const _walletActionAttempts = 1;
 
   String? _lastAuthToken;
   String? _lastAddress;
@@ -280,6 +295,57 @@ class MobileWalletAdapterService implements WalletService {
     } finally {
       await scenario?.close();
     }
+  }
+
+  /// Polls `getSignatureStatuses` every 2 s until the tx is confirmed or the
+  /// [timeout] expires. Returns true only when `confirmationStatus` is
+  /// 'confirmed' or 'finalized' AND `err` is null.
+  @override
+  Future<bool> confirmTransaction(
+    String signature, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    const pollInterval = Duration(seconds: 2);
+    final deadline = DateTime.now().add(timeout);
+
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(pollInterval);
+      try {
+        final body = jsonEncode({
+          'jsonrpc': '2.0',
+          'id': 1,
+          'method': 'getSignatureStatuses',
+          'params': [
+            [signature],
+            {'searchTransactionHistory': false},
+          ],
+        });
+        final response = await _postJson(_rpcEndpoint, body);
+        if (response.statusCode < 200 || response.statusCode >= 300) continue;
+
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>?;
+        final values =
+            (decoded?['result']?['value'] as List?)?.cast<Object?>();
+        if (values != null && values.isNotEmpty && values[0] != null) {
+          final status = values[0] as Map;
+          if (status['err'] != null) {
+            _debugLog('confirmTransaction: on-chain error — ${status['err']}');
+            return false;
+          }
+          final cs = status['confirmationStatus'] as String?;
+          if (cs == 'confirmed' || cs == 'finalized') {
+            _debugLog('confirmTransaction: $cs ✓');
+            return true;
+          }
+          _debugLog('confirmTransaction: status=$cs, waiting...');
+        }
+      } catch (e) {
+        _debugLog('confirmTransaction poll error: $e');
+      }
+    }
+
+    _debugLog('confirmTransaction: timed out after ${timeout.inSeconds}s');
+    return false;
   }
 
   Future<_HttpResult> _postJson(Uri uri, String body) async {

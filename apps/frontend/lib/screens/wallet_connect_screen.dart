@@ -93,6 +93,8 @@ class _WalletConnectScreenState extends State<WalletConnectScreen>
                 widget.walletService.signAndSendTransactionBase64(
               transactionBase64: transactionBase64,
             ),
+            transactionConfirmer: (signature) =>
+                widget.walletService.confirmTransaction(signature),
           ),
         ),
       );
