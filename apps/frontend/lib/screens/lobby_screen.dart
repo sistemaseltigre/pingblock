@@ -377,9 +377,19 @@ class _LobbyScreenState extends State<LobbyScreen> {
             'Escrow confirmed ✓ (${WagerAmountParser.lamportsToSolText(lamports)} SOL). Starting CPU game...';
       });
 
-      // Wager escrow is confirmed on-chain. Start a CPU game to verify the
-      // full blockchain flow end-to-end without needing a second player.
-      _socket.joinVsCpu(name, _selectedDifficulty);
+      // Wager escrow is confirmed on-chain.
+      // Pass all escrow data so the backend can create a matching house escrow,
+      // call match_wagers on-chain, and settle the result after the game.
+      debugPrint('[PingBlock] _wagerVsCpu: joining CPU wager game with escrow data');
+      _socket.joinVsCpu(
+        name,
+        _selectedDifficulty,
+        wallet:        widget.walletAddress,
+        lamports:      lamports,
+        escrowTxSig:   escrowSig,
+        intentId:      prepared.intentId,
+        wagerEscrowPda: prepared.wagerEscrowPda,
+      );
     } catch (e, st) {
       debugPrint('[PingBlock] _wagerVsCpu ERROR: $e\n$st');
       if (!mounted) return;

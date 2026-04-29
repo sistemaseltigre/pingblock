@@ -29,9 +29,24 @@ app.post('/wager/prepare-escrow', async (req, res) => {
     });
     return res.json(prepared);
   } catch (e) {
-    return res.status(400).json({
-      error: e.message || String(e),
+    return res.status(400).json({ error: e.message || String(e) });
+  }
+});
+
+// Returns an unsigned cancel_wager_and_refund transaction for the player to sign via MWA.
+app.post('/wager/prepare-cancel', async (req, res) => {
+  const { wallet, intentId } = req.body || {};
+  if (!wallet || intentId == null) {
+    return res.status(400).json({ error: 'wallet and intentId are required' });
+  }
+  try {
+    const result = await gm.wagerCustody.prepareCancelTx({
+      playerWallet: wallet,
+      intentId,
     });
+    return res.json(result);
+  } catch (e) {
+    return res.status(400).json({ error: e.message || String(e) });
   }
 });
 
@@ -89,9 +104,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on(EVENTS.JOIN_VS_CPU, ({ name, difficulty } = {}) => {
-    console.log(`[~] join_vs_cpu ${socket.id} name=${name} difficulty=${difficulty}`);
-    gm.joinVsCpu(socket, name, difficulty || 'medium');
+  socket.on(EVENTS.JOIN_VS_CPU, async ({ name, difficulty, wallet, lamports, escrowTxSig, intentId, wagerEscrowPda } = {}) => {
+    console.log(`[~] join_vs_cpu ${socket.id} name=${name} difficulty=${difficulty} wager=${!!wallet}`);
+    const wager = (wallet && lamports && escrowTxSig && intentId)
+      ? { wallet, lamports, escrowTxSig, intentId, wagerEscrowPda }
+      : null;
+    try {
+      await gm.joinVsCpu(socket, name, difficulty || 'medium', wager);
+    } catch (e) {
+      console.error(`[!] join_vs_cpu error: ${e.message || e}`);
+      socket.emit(EVENTS.WAGER_ERROR, {
+        code: 'CPU_WAGER_SETUP_FAILED',
+        message: e.message || String(e),
+      });
+    }
   });
 
   socket.on(EVENTS.PADDLE_MOVE, ({ y }) => {

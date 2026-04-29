@@ -90,10 +90,31 @@ class SocketService {
     _emit(SocketEvents.cancelWagerSearch, null);
   }
 
-  /// Debug mode: play against a CPU opponent immediately.
+  /// Play against a CPU opponent.
   /// [difficulty] must be 'easy', 'medium', or 'hard'.
-  void joinVsCpu(String playerName, String difficulty) {
-    _emit('join_vs_cpu', {'name': playerName, 'difficulty': difficulty});
+  /// Supply [wallet], [lamports], [escrowTxSig], [intentId] and [wagerEscrowPda]
+  /// to run a wager CPU game with full on-chain settlement.
+  void joinVsCpu(
+    String playerName,
+    String difficulty, {
+    String? wallet,
+    int? lamports,
+    String? escrowTxSig,
+    String? intentId,
+    String? wagerEscrowPda,
+  }) {
+    final payload = <String, dynamic>{
+      'name': playerName,
+      'difficulty': difficulty,
+    };
+    if (wallet != null && lamports != null && escrowTxSig != null && intentId != null) {
+      payload['wallet']         = wallet;
+      payload['lamports']       = lamports;
+      payload['escrowTxSig']    = escrowTxSig;
+      payload['intentId']       = intentId;
+      payload['wagerEscrowPda'] = wagerEscrowPda ?? '';
+    }
+    _emit('join_vs_cpu', payload);
   }
 
   /// [y] is in game-space coordinates (0..GameConstants.gameHeight)

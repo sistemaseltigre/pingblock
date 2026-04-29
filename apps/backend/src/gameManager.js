@@ -21,11 +21,17 @@ class GameManager {
     this.playerRoom = new Map();
     /** @type {Map<number, string[]>} lamports bucket -> socketId[] */
     this.wagerQueues = new Map();
-  /** @type {Map<string, {wallet:string, lamports:number, escrowTxSig:string, intentId:string|number, joinedAt:number}>} */
+    /** @type {Map<string, {wallet,lamports,escrowTxSig,intentId,wagerEscrowPda,joinedAt}>} */
     this.wagerEntries = new Map();
     /** @type {Map<string, number>} socketId -> lamports bucket */
     this.socketWagerBucket = new Map();
-    /** @type {Map<string, {wagerId:string, lamportsEach:number, potLamports:number, settled:boolean}>} */
+    /**
+     * @type {Map<string, {
+     *   wagerId, lamportsEach, potLamports, settled,
+     *   matchEscrowPda, wagerEscrowPdaA, wagerEscrowPdaB,
+     *   playerAWallet, playerBWallet, matchWagersSig
+     * }>}
+     */
     this.roomWagers = new Map();
     this.wagerCustody = opts.wagerCustody || new WagerCustodyService();
   }
@@ -80,12 +86,7 @@ class GameManager {
       return;
     }
 
-    const verified = await this.wagerCustody.verifyEscrow({
-      wallet,
-      lamports,
-      escrowTxSig,
-      intentId,
-    });
+    const verified = await this.wagerCustody.verifyEscrow({ wallet, lamports, escrowTxSig, intentId });
     if (!verified) {
       socket.emit(EVENTS.WAGER_ERROR, {
         code: 'WAGER_ESCROW_NOT_VERIFIED',
@@ -93,6 +94,11 @@ class GameManager {
       });
       return;
     }
+
+    // Derive the wager_escrow PDA so we can use it later for match_wagers.
+    const wagerEscrowPda = this.wagerCustody.mode === 'onchain'
+      ? this.wagerCustody.solana.deriveWagerEscrowPda(wallet, intentId)
+      : `mock_escrow_${wallet}_${intentId}`;
 
     socket.data.playerName = playerName || `Player_${socket.id.slice(0, 4)}`;
     socket.data.wallet = wallet;
@@ -106,14 +112,12 @@ class GameManager {
       lamports,
       escrowTxSig,
       intentId,
+      wagerEscrowPda,
       joinedAt: Date.now(),
     });
     this.socketWagerBucket.set(socket.id, lamports);
 
-    socket.emit(EVENTS.WAGER_LOBBY_JOINED, {
-      position: bucket.length,
-      lamports,
-    });
+    socket.emit(EVENTS.WAGER_LOBBY_JOINED, { position: bucket.length, lamports });
 
     if (bucket.length >= 2) {
       const [idA, idB] = bucket.splice(0, 2);
@@ -147,12 +151,25 @@ class GameManager {
   }
 
   /**
-   * Create an immediate room against a CPU opponent (debug/local mode).
+   * Join a CPU game, optionally with a wager.
+   *
+   * When wager params are provided:
+   *   1. Verify the player's escrow on-chain.
+   *   2. Create a matching "house" escrow (backend signs).
+   *   3. Call match_wagers on-chain to link both escrows.
+   *   4. Start the game; settle on completion.
+   *
    * @param {Socket} socket
    * @param {string} playerName
-   * @param {string} difficulty 'easy' | 'medium' | 'hard'
+   * @param {string} difficulty  'easy' | 'medium' | 'hard'
+   * @param {object} [wager]     Optional wager params
+   * @param {string}  wager.wallet
+   * @param {number}  wager.lamports
+   * @param {string}  wager.escrowTxSig
+   * @param {string}  wager.intentId
+   * @param {string}  [wager.wagerEscrowPda]
    */
-  joinVsCpu(socket, playerName, difficulty) {
+  async joinVsCpu(socket, playerName, difficulty, wager = null) {
     if (this.playerRoom.has(socket.id)) {
       socket.emit(EVENTS.ERROR, { message: 'Already in a game' });
       return;
@@ -161,7 +178,73 @@ class GameManager {
     const diff = AI_DIFFICULTIES.includes(difficulty) ? difficulty : 'medium';
     socket.data.playerName = playerName || `Player_${socket.id.slice(0, 4)}`;
 
-    // Human is always on the right; AI is on the left
+    const isWagerGame = !!(wager && wager.wallet && wager.lamports && wager.escrowTxSig && wager.intentId);
+    let wagerRoomData = null;
+
+    if (isWagerGame) {
+      // Validate wager amount
+      if (!isValidWagerAmountLamports(wager.lamports, WAGER.MIN_LAMPORTS, WAGER.MAX_LAMPORTS)) {
+        socket.emit(EVENTS.WAGER_ERROR, {
+          code: 'INVALID_WAGER_AMOUNT',
+          message: `Wager must be between ${WAGER.MIN_LAMPORTS} and ${WAGER.MAX_LAMPORTS} lamports`,
+        });
+        return;
+      }
+
+      // Verify the player's escrow
+      socket.emit(EVENTS.WAGER_LOBBY_JOINED, { position: 1, lamports: wager.lamports });
+      const verified = await this.wagerCustody.verifyEscrow({
+        wallet: wager.wallet,
+        lamports: wager.lamports,
+        escrowTxSig: wager.escrowTxSig,
+        intentId: wager.intentId,
+      });
+      if (!verified) {
+        socket.emit(EVENTS.WAGER_ERROR, {
+          code: 'WAGER_ESCROW_NOT_VERIFIED',
+          message: 'Escrow transaction could not be verified for this wallet/amount.',
+        });
+        return;
+      }
+
+      // Derive player's wager escrow PDA
+      const playerEscrowPda = wager.wagerEscrowPda ||
+        (this.wagerCustody.mode === 'onchain'
+          ? this.wagerCustody.solana.deriveWagerEscrowPda(wager.wallet, wager.intentId)
+          : `mock_escrow_${wager.wallet}_${wager.intentId}`);
+
+      console.log(`[GameManager] CPU wager: creating house escrow for ${wager.lamports} lamports...`);
+
+      // Create house escrow (backend's matching stake)
+      const house = await this.wagerCustody.initHouseEscrow({ lamports: wager.lamports });
+      console.log(`[GameManager] CPU wager: house escrow=${house.houseEscrowPda} sig=${house.houseEscrowSig}`);
+
+      // Call match_wagers: player = escrow A, house = escrow B
+      const wagerId = uuidv4();
+      console.log(`[GameManager] CPU wager: calling match_wagers wagerId=${wagerId}`);
+      const { matchWagersSig, matchEscrowPda } = await this.wagerCustody.matchWagersOnChain({
+        wagerId,
+        wagerEscrowPdaA: playerEscrowPda,
+        wagerEscrowPdaB: house.houseEscrowPda,
+      });
+      console.log(`[GameManager] CPU wager: match_wagers ok sig=${matchWagersSig} matchEscrow=${matchEscrowPda}`);
+
+      wagerRoomData = {
+        wagerId,
+        lamportsEach:    wager.lamports,
+        potLamports:     wager.lamports * 2,
+        settled:         false,
+        matchEscrowPda,
+        wagerEscrowPdaA: playerEscrowPda,   // player is A
+        wagerEscrowPdaB: house.houseEscrowPda, // house is B
+        playerAWallet:   wager.wallet,
+        playerBWallet:   house.houseWallet,
+        matchWagersSig,
+      };
+    }
+
+    // ── Build room ───────────────────────────────────────────────────────────
+
     const humanSide = 'right';
     const aiSide    = 'left';
 
@@ -174,8 +257,23 @@ class GameManager {
     const room = {
       id: roomId,
       players: {
-        left:  { id: ai.id,      name: ai.name,                    score: 0, paddleType: aiPaddleType,    powerCooldownUntil: 0 },
-        right: { id: socket.id,  name: socket.data.playerName,     score: 0, paddleType: humanPaddleType, powerCooldownUntil: 0 },
+        left:  {
+          id:                 ai.id,
+          name:               ai.name,
+          score:              0,
+          paddleType:         aiPaddleType,
+          powerCooldownUntil: 0,
+          // House wallet for wager settlement (null for free games)
+          wallet: isWagerGame ? wagerRoomData.playerBWallet : null,
+        },
+        right: {
+          id:                 socket.id,
+          name:               socket.data.playerName,
+          score:              0,
+          paddleType:         humanPaddleType,
+          powerCooldownUntil: 0,
+          wallet: isWagerGame ? wager.wallet : null,
+        },
       },
       ball:    initialBall(),
       paddles: {
@@ -186,15 +284,19 @@ class GameManager {
       interval:  null,
       lastTick:  Date.now(),
       started:   false,
-      // ── CPU fields ──────────────────────────────────────────────────────
-      aiPlayer: ai,
+      aiPlayer:  ai,
       aiSide,
-      isCpuGame: true,
+      isCpuGame:   true,
+      isWagerGame: isWagerGame,
     };
 
     this.rooms.set(roomId, room);
     this.playerRoom.set(socket.id, roomId);
-    this.playerRoom.set(ai.id, roomId); // register AI id too (for usePower path)
+    this.playerRoom.set(ai.id, roomId);
+
+    if (isWagerGame) {
+      this.roomWagers.set(roomId, wagerRoomData);
+    }
 
     socket.join(roomId);
 
@@ -202,11 +304,20 @@ class GameManager {
       roomId,
       vscpu:      true,
       difficulty: diff,
-      left:  { name: ai.name,                    paddleType: aiPaddleType    },
-      right: { name: socket.data.playerName,     paddleType: humanPaddleType },
+      left:  { name: ai.name,                paddleType: aiPaddleType    },
+      right: { name: socket.data.playerName, paddleType: humanPaddleType },
     };
 
     socket.emit(EVENTS.MATCH_FOUND, matchPayload);
+
+    if (isWagerGame) {
+      socket.emit(EVENTS.WAGER_MATCH_FOUND, {
+        wagerId:      wagerRoomData.wagerId,
+        roomId,
+        lamportsEach: wager.lamports,
+        potLamports:  wager.lamports * 2,
+      });
+    }
 
     setTimeout(() => this._startGame(roomId), 3000);
   }
@@ -311,12 +422,6 @@ class GameManager {
     this.rooms.set(roomId, room);
     this.playerRoom.set(idA, roomId);
     this.playerRoom.set(idB, roomId);
-    this.roomWagers.set(roomId, {
-      wagerId,
-      lamportsEach,
-      potLamports: lamportsEach * 2,
-      settled: false,
-    });
 
     this.socketWagerBucket.delete(idA);
     this.socketWagerBucket.delete(idB);
@@ -329,7 +434,7 @@ class GameManager {
     const matchPayload = {
       roomId,
       vscpu: false,
-      left: { name: room.players.left.name, paddleType: paddleA },
+      left:  { name: room.players.left.name,  paddleType: paddleA },
       right: { name: room.players.right.name, paddleType: paddleB },
     };
 
@@ -337,18 +442,46 @@ class GameManager {
     this.io.to(roomId).emit(EVENTS.WAGER_MATCH_FOUND, {
       wagerId,
       roomId,
-      left: {
-        name: room.players.left.name,
-        paddleType: paddleA,
-        wallet: room.players.left.wallet,
-      },
-      right: {
-        name: room.players.right.name,
-        paddleType: paddleB,
-        wallet: room.players.right.wallet,
-      },
+      left:  { name: room.players.left.name,  paddleType: paddleA, wallet: entryA.wallet },
+      right: { name: room.players.right.name, paddleType: paddleB, wallet: entryB.wallet },
       lamportsEach,
       potLamports: lamportsEach * 2,
+    });
+
+    // Call match_wagers on-chain asynchronously (game starts in 3s regardless).
+    // If it fails the room will have no matchEscrowPda and settlement will emit WAGER_ERROR.
+    let matchEscrowPda = null;
+    let matchWagersSig = null;
+
+    try {
+      console.log(`[GameManager] PvP wager: calling match_wagers wagerId=${wagerId}`);
+      const result = await this.wagerCustody.matchWagersOnChain({
+        wagerId,
+        wagerEscrowPdaA: entryA.wagerEscrowPda,
+        wagerEscrowPdaB: entryB.wagerEscrowPda,
+      });
+      matchEscrowPda = result.matchEscrowPda;
+      matchWagersSig = result.matchWagersSig;
+      console.log(`[GameManager] PvP wager: match_wagers ok sig=${matchWagersSig} matchEscrow=${matchEscrowPda}`);
+    } catch (e) {
+      console.error(`[GameManager] PvP wager: match_wagers FAILED: ${e.message || e}`);
+      this.io.to(roomId).emit(EVENTS.WAGER_ERROR, {
+        code: 'MATCH_WAGERS_FAILED',
+        message: `Failed to link escrows on-chain: ${e.message || e}`,
+      });
+    }
+
+    this.roomWagers.set(roomId, {
+      wagerId,
+      lamportsEach,
+      potLamports: lamportsEach * 2,
+      settled: false,
+      matchEscrowPda,
+      wagerEscrowPdaA: entryA.wagerEscrowPda,
+      wagerEscrowPdaB: entryB.wagerEscrowPda,
+      playerAWallet:   entryA.wallet,
+      playerBWallet:   entryB.wallet,
+      matchWagersSig,
     });
 
     setTimeout(() => this._startGame(roomId), 3000);
@@ -375,27 +508,23 @@ class GameManager {
     const dt  = (now - room.lastTick) / 1000;
     room.lastTick = now;
 
-    // ── AI move (CPU games) ────────────────────────────────────────────────
     if (room.aiPlayer) {
-      const ai      = room.aiPlayer;
-      const aiSide  = room.aiSide;
-      const newY    = ai.computeMove(room.ball, room.paddles[aiSide]);
+      const ai     = room.aiPlayer;
+      const aiSide = room.aiSide;
+      const newY   = ai.computeMove(room.ball, room.paddles[aiSide]);
       room.paddles[aiSide].y = newY;
 
-      // AI maybe uses power
       if (ai.shouldUsePower(now)) {
         this._activatePowerForSide(roomId, aiSide, now);
       }
     }
 
-    // ── Power expiry ───────────────────────────────────────────────────────
     for (const side of ['left', 'right']) {
       const ap = room.activePowers[side];
       if (ap && now >= ap.expiresAt) {
         room.paddles[side].power = null;
         room.activePowers[side]  = null;
         this.io.to(roomId).emit(EVENTS.POWER_EXPIRED, { side });
-        // Reset earth paddle height
         if (ap.type === 'earth') {
           room.paddles[side].height = GAME.PADDLE_HEIGHT;
         }
@@ -404,7 +533,6 @@ class GameManager {
       }
     }
 
-    // ── Physics ────────────────────────────────────────────────────────────
     const { ball, scored } = stepBall(room.ball, room.paddles, dt);
     room.ball = ball;
 
@@ -422,7 +550,6 @@ class GameManager {
       }
     }
 
-    // ── Broadcast ──────────────────────────────────────────────────────────
     this.io.to(roomId).emit(EVENTS.GAME_STATE, {
       ball:    room.ball,
       paddles: {
@@ -458,7 +585,6 @@ class GameManager {
     this._activatePowerForSide(roomId, side, Date.now());
   }
 
-  /** Internal — activates power for a side (human or AI). */
   _activatePowerForSide(roomId, side, now) {
     const room = this.rooms.get(roomId);
     if (!room) return;
@@ -469,7 +595,6 @@ class GameManager {
 
     player.powerCooldownUntil = now + GAME.POWER_COOLDOWN_MS;
 
-    // Earth: grow paddle
     if (player.paddleType === 'earth') {
       room.paddles[side].height = GAME.PADDLE_HEIGHT * 1.5;
     }
@@ -522,9 +647,8 @@ class GameManager {
     const qi = this.queue.indexOf(socketId);
     if (qi !== -1) this.queue.splice(qi, 1);
 
-    // Wager queue disconnect => refund
     const wagerBucket = this.socketWagerBucket.get(socketId);
-    const wagerEntry = this.wagerEntries.get(socketId);
+    const wagerEntry  = this.wagerEntries.get(socketId);
     if (wagerBucket != null && wagerEntry) {
       const bucket = this.wagerQueues.get(wagerBucket);
       if (bucket) {
@@ -533,7 +657,6 @@ class GameManager {
       }
       this.socketWagerBucket.delete(socketId);
       this.wagerEntries.delete(socketId);
-
       this.wagerCustody.refundSearchCancel(wagerEntry).catch(() => {});
     }
 
@@ -545,7 +668,6 @@ class GameManager {
 
     clearInterval(room.interval);
 
-    // In CPU games don't broadcast opponent_left (there's no opponent socket)
     if (!room.isCpuGame) {
       this.io.to(roomId).emit(EVENTS.OPPONENT_LEFT, {});
     }
@@ -555,7 +677,6 @@ class GameManager {
       return;
     }
 
-    // Disconnect in matched game counts as loss for quitter.
     const quitterSide = this._sideOf(socketId, room);
     if (!quitterSide) {
       this._cleanRoom(roomId);
@@ -577,10 +698,8 @@ class GameManager {
     this.rooms.delete(roomId);
   }
 
-  /** Returns the side for human socket IDs only (skips AI id). */
   _humanSideOf(socketId, room) {
     if (room.players.right.id === socketId) return 'right';
-    // In non-CPU games the left player is also human
     if (!room.isCpuGame && room.players.left.id === socketId) return 'left';
     return null;
   }
@@ -598,13 +717,15 @@ class GameManager {
   getWagerQueue(lamports) { return [...(this.wagerQueues.get(lamports) || [])]; }
 
   async _settleWagerRoom(roomId, winnerSide) {
-    const room = this.rooms.get(roomId);
+    const room  = this.rooms.get(roomId);
     const wager = this.roomWagers.get(roomId);
     if (!room || !wager || wager.settled) return;
 
     wager.settled = true;
     const winnerWallet = room.players[winnerSide]?.wallet;
-    const loserWallet = room.players[winnerSide === 'left' ? 'right' : 'left']?.wallet;
+    const loserSide    = winnerSide === 'left' ? 'right' : 'left';
+    const loserWallet  = room.players[loserSide]?.wallet;
+
     if (!winnerWallet || !loserWallet) {
       this.io.to(roomId).emit(EVENTS.WAGER_ERROR, {
         code: 'MISSING_WALLETS',
@@ -613,20 +734,34 @@ class GameManager {
       return;
     }
 
+    if (!wager.matchEscrowPda) {
+      this.io.to(roomId).emit(EVENTS.WAGER_ERROR, {
+        code: 'MATCH_ESCROW_MISSING',
+        message: 'match_wagers was never completed — cannot settle on-chain',
+      });
+      return;
+    }
+
     this.io.to(roomId).emit(EVENTS.WAGER_SETTLEMENT_PENDING, { wagerId: wager.wagerId });
+
     const settlement = await this.wagerCustody.settleMatch({
-      wagerId: wager.wagerId,
-      lamportsEach: wager.lamportsEach,
+      wagerId:        wager.wagerId,
+      lamportsEach:   wager.lamportsEach,
       winnerWallet,
       loserWallet,
+      matchEscrowPda:  wager.matchEscrowPda,
+      wagerEscrowPdaA: wager.wagerEscrowPdaA,
+      wagerEscrowPdaB: wager.wagerEscrowPdaB,
+      playerAWallet:   wager.playerAWallet,
+      playerBWallet:   wager.playerBWallet,
     });
 
     this.io.to(roomId).emit(EVENTS.WAGER_SETTLEMENT_DONE, {
-      wagerId: settlement.wagerId,
-      winnerWallet: settlement.winnerWallet,
-      winnerLamports: settlement.winnerLamports.toString(),
+      wagerId:          settlement.wagerId,
+      winnerWallet:     settlement.winnerWallet,
+      winnerLamports:   settlement.winnerLamports.toString(),
       treasuryLamports: settlement.treasuryLamports.toString(),
-      settlementTxSig: settlement.settlementTxSig,
+      settlementTxSig:  settlement.settlementTxSig,
     });
   }
 }

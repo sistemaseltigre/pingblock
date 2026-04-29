@@ -11,6 +11,7 @@ const {
 } = require('@solana/web3.js');
 const { WAGER } = require('./constants');
 const { computePayouts } = require('./wagerRules');
+const { SolanaClient } = require('./solanaClient');
 
 const DEFAULT_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
 const DEFAULT_PROGRAM_ID =
@@ -46,17 +47,10 @@ function parseEscrowAccount(data) {
   };
 }
 
-/**
- * Custody gateway for wager escrow validation/refund/settlement.
- *
- * Modes:
- * - mock (default): deterministic local behavior
- * - onchain: prepares and verifies real `init_wager_escrow` transactions on Solana
- */
 class WagerCustodyService {
   constructor(opts = {}) {
-    this.mode = opts.mode || DEFAULT_CUSTODY_MODE;
-    this.rpcUrl = opts.rpcUrl || DEFAULT_RPC_URL;
+    this.mode      = opts.mode      || DEFAULT_CUSTODY_MODE;
+    this.rpcUrl    = opts.rpcUrl    || DEFAULT_RPC_URL;
     this.programId = new PublicKey(opts.programId || DEFAULT_PROGRAM_ID);
 
     if (this.mode === 'onchain') {
@@ -65,34 +59,34 @@ class WagerCustodyService {
         [Buffer.from('wager_config')],
         this.programId,
       )[0];
+      this.solana = new SolanaClient({
+        rpcUrl:    this.rpcUrl,
+        programId: this.programId.toBase58(),
+      });
     }
+
+    console.log(`[WagerCustody] mode=${this.mode}`);
   }
+
+  // ── prepareEscrowTransaction ──────────────────────────────────────────────
 
   async prepareEscrowTransaction({ wallet, lamports, intentId }) {
     if (this.mode !== 'onchain') {
       throw new Error('prepareEscrowTransaction is only available in onchain mode');
     }
-    if (!wallet || typeof wallet !== 'string') {
-      throw new Error('wallet is required');
-    }
-    if (!Number.isSafeInteger(lamports) || lamports <= 0) {
-      throw new Error('lamports must be a positive integer');
-    }
+    if (!wallet || typeof wallet !== 'string') throw new Error('wallet is required');
+    if (!Number.isSafeInteger(lamports) || lamports <= 0) throw new Error('lamports must be a positive integer');
 
     const programInfo = await this.connection.getAccountInfo(this.programId, 'confirmed');
-    if (!programInfo) {
-      throw new Error(`Program ${this.programId.toBase58()} is not deployed on ${this.rpcUrl}`);
-    }
+    if (!programInfo) throw new Error(`Program ${this.programId.toBase58()} is not deployed on ${this.rpcUrl}`);
     const configInfo = await this.connection.getAccountInfo(this.wagerConfigPda, 'confirmed');
-    if (!configInfo) {
-      throw new Error(
-        `Wager config PDA ${this.wagerConfigPda.toBase58()} is not initialized for program ${this.programId.toBase58()}`,
-      );
-    }
+    if (!configInfo) throw new Error(`Wager config PDA ${this.wagerConfigPda.toBase58()} is not initialized`);
 
     const playerPk = new PublicKey(wallet);
     const resolvedIntent =
-      intentId != null ? BigInt(intentId) : BigInt(Date.now() * 1000 + Math.floor(Math.random() * 1000));
+      intentId != null
+        ? BigInt(intentId)
+        : BigInt(Date.now() * 1000 + Math.floor(Math.random() * 1000));
 
     const [wagerEscrowPda] = PublicKey.findProgramAddressSync(
       [Buffer.from('wager_escrow'), playerPk.toBuffer(), u64Le(resolvedIntent)],
@@ -108,10 +102,10 @@ class WagerCustodyService {
     const ix = new TransactionInstruction({
       programId: this.programId,
       keys: [
-        { pubkey: this.wagerConfigPda, isSigner: false, isWritable: false },
-        { pubkey: wagerEscrowPda, isSigner: false, isWritable: true },
-        { pubkey: playerPk, isSigner: true, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: this.wagerConfigPda,         isSigner: false, isWritable: false },
+        { pubkey: wagerEscrowPda,              isSigner: false, isWritable: true  },
+        { pubkey: playerPk,                    isSigner: true,  isWritable: true  },
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false },
       ],
       data: ixData,
     });
@@ -139,6 +133,8 @@ class WagerCustodyService {
     };
   }
 
+  // ── verifyEscrow ──────────────────────────────────────────────────────────
+
   async verifyEscrow({ wallet, lamports, escrowTxSig, intentId }) {
     if (this.mode !== 'onchain') {
       if (!wallet || typeof wallet !== 'string') return false;
@@ -159,7 +155,6 @@ class WagerCustodyService {
         this.programId,
       );
 
-      // Wallet sign-and-send can race propagation by a few hundred ms.
       for (let i = 0; i < 6; i++) {
         const sigStatus = await this.connection.getSignatureStatus(escrowTxSig, {
           searchTransactionHistory: true,
@@ -182,7 +177,6 @@ class WagerCustodyService {
         if (escrow.player !== wallet) return false;
         if (escrow.intentId !== BigInt(intentId)) return false;
         if (escrow.amountLamports !== BigInt(lamports)) return false;
-        // Initiated
         if (escrow.status !== 0) return false;
         return true;
       }
@@ -192,9 +186,64 @@ class WagerCustodyService {
     }
   }
 
+  // ── matchWagersOnChain ────────────────────────────────────────────────────
+
+  async matchWagersOnChain({ wagerId, wagerEscrowPdaA, wagerEscrowPdaB }) {
+    if (this.mode !== 'onchain') {
+      return {
+        matchWagersSig: `mock_match_${uuidv4().replace(/-/g, '')}`,
+        matchEscrowPda: `mock_match_escrow_${wagerId}`,
+      };
+    }
+    const result = await this.solana.matchWagers({ wagerId, wagerEscrowPdaA, wagerEscrowPdaB });
+    return { matchWagersSig: result.sig, matchEscrowPda: result.matchEscrowPda };
+  }
+
+  // ── initHouseEscrow ───────────────────────────────────────────────────────
+
+  async initHouseEscrow({ lamports }) {
+    const houseIntentId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+
+    if (this.mode !== 'onchain') {
+      return {
+        houseIntentId: houseIntentId.toString(),
+        houseEscrowPda: `mock_house_escrow_${houseIntentId}`,
+        houseEscrowSig: `mock_house_sig_${uuidv4().replace(/-/g, '')}`,
+        houseWallet: 'mock_house_wallet',
+      };
+    }
+
+    const { sig, wagerEscrowPda } = await this.solana.initHouseEscrow({
+      intentId: houseIntentId,
+      lamports,
+    });
+
+    return {
+      houseIntentId: houseIntentId.toString(),
+      houseEscrowPda: wagerEscrowPda,
+      houseEscrowSig: sig,
+      houseWallet: this.solana.authority.publicKey.toBase58(),
+    };
+  }
+
+  // ── prepareCancelTx ───────────────────────────────────────────────────────
+
+  async prepareCancelTx({ playerWallet, intentId }) {
+    if (this.mode !== 'onchain') {
+      return {
+        txBase64: Buffer.from('mock_cancel_tx').toString('base64'),
+        blockhash: 'mockhash',
+        lastValidBlockHeight: 0,
+      };
+    }
+    return this.solana.buildCancelTx({ playerWallet, intentId });
+  }
+
+  // ── refundSearchCancel ────────────────────────────────────────────────────
+  // cancel_wager_and_refund requires the player as signer.
+  // Use prepareCancelTx + client MWA signing for real on-chain refunds.
+
   async refundSearchCancel({ wallet, lamports, escrowTxSig }) {
-    // NOTE: current on-chain program requires the player signer for cancel.
-    // Backend relayer-only cancel is still mocked until client-side cancel tx is implemented.
     return {
       ok: true,
       wallet,
@@ -204,13 +253,54 @@ class WagerCustodyService {
     };
   }
 
-  async settleMatch({ wagerId, lamportsEach, winnerWallet, loserWallet }) {
+  // ── settleMatch ───────────────────────────────────────────────────────────
+
+  async settleMatch({
+    wagerId,
+    lamportsEach,
+    winnerWallet,
+    loserWallet,
+    matchEscrowPda,
+    wagerEscrowPdaA,
+    wagerEscrowPdaB,
+    playerAWallet,
+    playerBWallet,
+  }) {
     const { potLamports, winnerLamports, treasuryLamports } = computePayouts(
       lamportsEach,
       WAGER.TREASURY_BPS,
     );
 
-    // In real implementation, call Solana program `settle_match`.
+    if (this.mode !== 'onchain') {
+      return {
+        ok: true,
+        wagerId,
+        winnerWallet,
+        loserWallet,
+        lamportsEach: BigInt(lamportsEach),
+        potLamports,
+        winnerLamports,
+        treasuryLamports,
+        settlementTxSig: `settle_${uuidv4().replace(/-/g, '')}`,
+      };
+    }
+
+    if (!matchEscrowPda || !wagerEscrowPdaA || !wagerEscrowPdaB ||
+        !playerAWallet  || !playerBWallet) {
+      throw new Error(
+        'settleMatch (onchain): matchEscrowPda, wagerEscrowPdaA/B, playerA/BWallet are all required',
+      );
+    }
+
+    const settlementTxSig = await this.solana.settleMatch({
+      matchEscrowPda,
+      wagerEscrowPdaA,
+      wagerEscrowPdaB,
+      playerAWallet,
+      playerBWallet,
+      winnerWallet,
+    });
+
     return {
       ok: true,
       wagerId,
@@ -220,7 +310,7 @@ class WagerCustodyService {
       potLamports,
       winnerLamports,
       treasuryLamports,
-      settlementTxSig: `settle_${uuidv4().replace(/-/g, '')}`,
+      settlementTxSig,
     };
   }
 }
