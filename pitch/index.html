@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PingBlock | Frontier Hackathon Pitch</title>
+    <meta name="description" content="PingBlock: competitive ping pong with on-chain wagers and NFT paddles, built exclusively for Solana Mobile." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div class="court-lines" aria-hidden="true"></div>
+
+    <main class="deck" id="deck" aria-label="PingBlock pitch deck">
+      <section class="slide hero is-active" data-title="Opening">
+        <div class="slide-grid hero-grid">
+          <div class="copy hero-copy">
+            <p class="eyebrow">Frontier Hackathon · Solana Mobile</p>
+            <h1>PingBlock</h1>
+            <p class="tagline">Competitive ping pong where every match can move real SOL, every paddle can become an NFT, and every rally feeds a mobile-first game economy.</p>
+            <div class="hero-actions">
+              <button class="primary-action" data-next>View pitch</button>
+              <span class="hint">Use ← → or space to navigate</span>
+            </div>
+          </div>
+          <div class="arena-card" aria-label="PingBlock gameplay illustration">
+            <div class="arena-top"><span>LIVE WAGER</span><strong>0.50 SOL POT</strong></div>
+            <div class="pong-field">
+              <div class="score left-score">3</div>
+              <div class="score right-score">5</div>
+              <div class="net"></div>
+              <div class="paddle paddle-left"></div>
+              <div class="paddle paddle-right"></div>
+              <div class="ball"></div>
+              <div class="spark spark-a"></div>
+              <div class="spark spark-b"></div>
+            </div>
+            <div class="arena-bottom">
+              <span>Phoenix NFT</span>
+              <span>Escrow confirmed</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide problem" data-title="Problem">
+        <div class="section-label">01 / Problem</div>
+        <div class="big-statement">Casual games are massive, but their economies usually live outside the gameplay.</div>
+        <div class="cards three">
+          <article><span>No real stakes</span><p>Most casual matches have no immediate economic layer attached to the outcome.</p></article>
+          <article><span>No trust layer</span><p>When players wager, settlement often depends on closed platforms or manual agreements.</p></article>
+          <article><span>No ownership</span><p>Cosmetics and power-ups rarely become transferable, player-owned assets.</p></article>
+        </div>
+      </section>
+
+      <section class="slide solution" data-title="Solution">
+        <div class="slide-grid">
+          <div class="copy">
+            <div class="section-label">02 / Solution</div>
+            <h2>A PvP wager arcade built for Solana Mobile.</h2>
+            <p>PingBlock combines fast ping pong matches, real-time matchmaking, and on-chain custody so two players can compete for a transparent prize pool.</p>
+          </div>
+          <div class="flow-card">
+            <div class="flow-step"><b>1</b><span>Connect mobile wallet</span></div>
+            <div class="flow-step"><b>2</b><span>Choose a SOL wager</span></div>
+            <div class="flow-step"><b>3</b><span>Lock escrow on-chain</span></div>
+            <div class="flow-step"><b>4</b><span>Play in real time</span></div>
+            <div class="flow-step"><b>5</b><span>Winner receives 90%</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide product" data-title="Product">
+        <div class="section-label">03 / Product</div>
+        <h2>Simple to play. Hard to ignore.</h2>
+        <div class="product-layout">
+          <div class="phone-frame">
+            <div class="phone-screen">
+              <div class="phone-title">PING<br>BLOCK</div>
+              <div class="wallet-chip">4Nd1...nEKL</div>
+              <div class="mode-card active">SOL Wager <strong>0.05</strong></div>
+              <div class="mode-card">Free Play</div>
+              <button>Find Wager Match</button>
+            </div>
+          </div>
+          <div class="feature-list">
+            <div><strong>Flutter + Flame</strong><span>Smooth mobile gameplay.</span></div>
+            <div><strong>Node.js + Socket.IO</strong><span>Real-time synchronized match state.</span></div>
+            <div><strong>Solana + Anchor</strong><span>Programmable escrow, refunds, and settlement.</span></div>
+            <div><strong>Mobile Wallet Adapter</strong><span>Native wallet UX for Solana Mobile.</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide economy" data-title="Economy">
+        <div class="slide-grid">
+          <div>
+            <div class="section-label">04 / Economy</div>
+            <h2>Direct business model: match volume + NFT paddles.</h2>
+            <p class="body-copy">Every wager match creates a prize pool. PingBlock keeps a 10% platform fee and the winner receives 90%. NFT paddles add ownership, rarity, and utility inside the game loop.</p>
+          </div>
+          <div class="split-pot">
+            <div class="pot-core">POT<br><strong>2x</strong></div>
+            <div class="payout winner"><span>90%</span><b>Winner</b></div>
+            <div class="payout treasury"><span>10%</span><b>PingBlock</b></div>
+          </div>
+        </div>
+        <div class="cards two">
+          <article><span>Fee per match</span><p>Recurring revenue from every on-chain wager match that settles successfully.</p></article>
+          <article><span>NFT paddles</span><p>Primary sales, seasonal drops, and potential marketplace royalties.</p></article>
+        </div>
+      </section>
+
+      <section class="slide nfts" data-title="NFTs">
+        <div class="section-label">05 / NFT Paddles</div>
+        <h2>Every paddle changes how the match is played.</h2>
+        <div class="paddles">
+          <article class="phoenix"><b>Phoenix</b><span>Fire Shot</span><p>+50% ball speed.</p></article>
+          <article class="frost"><b>Frost</b><span>Ice Wall</span><p>Slows the ball by 40%.</p></article>
+          <article class="thunder"><b>Thunder</b><span>Spark</span><p>Random hit-angle deviation.</p></article>
+          <article class="shadow"><b>Shadow</b><span>Phantom</span><p>Ball invisible for 1 second.</p></article>
+          <article class="earth"><b>Earth</b><span>Fortress</span><p>Paddle +50% height for 3 seconds.</p></article>
+        </div>
+      </section>
+
+      <section class="slide tech" data-title="Architecture">
+        <div class="section-label">06 / Architecture</div>
+        <h2>Demo-ready architecture, extensible to mainnet.</h2>
+        <div class="architecture">
+          <div class="arch-node mobile">Solana Mobile<br><span>Flutter game + wallet</span></div>
+          <div class="arch-line"></div>
+          <div class="arch-node backend">Realtime Backend<br><span>Matchmaking + physics</span></div>
+          <div class="arch-line"></div>
+          <div class="arch-node chain">Solana Program<br><span>Escrow + settlement</span></div>
+        </div>
+        <div class="metrics">
+          <div><b>60</b><span>ticks/s realtime sync</span></div>
+          <div><b>90/10</b><span>payout model</span></div>
+          <div><b>5</b><span>NFT paddle powers</span></div>
+        </div>
+      </section>
+
+      <section class="slide market" data-title="Go To Market">
+        <div class="section-label">07 / Solana Mobile Fit</div>
+        <div class="big-statement">PingBlock is not a game with a wallet bolted on. It is a game designed around the wallet.</div>
+        <div class="cards three">
+          <article><span>Solana Mobile exclusive</span><p>Distribution focused on users who already have wallets and on-chain habits.</p></article>
+          <article><span>Challenge-driven virality</span><p>Short matches, small wagers, and instant rematches.</p></article>
+          <article><span>NFT seasons</span><p>New paddles, tournaments, and drops designed to sustain retention.</p></article>
+        </div>
+      </section>
+
+      <section class="slide ask" data-title="Closing">
+        <div class="final-card">
+          <p class="eyebrow">Frontier Hackathon</p>
+          <h2>We want to make PingBlock the competitive arcade for Solana Mobile.</h2>
+          <p>At Frontier Hackathon, we are validating the complete loop: wallet → escrow → match → settlement → NFT ownership.</p>
+          <div class="closing-grid">
+            <span>Build on Solana</span>
+            <span>Mobile-first</span>
+            <span>Real stakes</span>
+            <span>NFT utility</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="deck-nav" aria-label="Presentation navigation">
+      <button id="prev" aria-label="Previous slide">←</button>
+      <div class="progress"><span id="progressBar"></span></div>
+      <span id="counter">1 / 9</span>
+      <button id="next" aria-label="Next slide">→</button>
+    </nav>
+
+    <div class="slide-tabs" id="tabs" aria-label="Slide tabs"></div>
+
+    <script src="./script.js"></script>
+  </body>
+</html>
